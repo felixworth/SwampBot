@@ -71,6 +71,13 @@ confirm the raw API field before changing this path.
   evidence.
 - Provider routing supports AskNews preconfigured routes,
   `smart-searcher/<model>`, a search-enabled LLM, or explicit `no_research`.
+- Responses must contain substantive text and at least one source URL.
+- Transient primary-provider failures retry once, then route through
+  `BOT_RESEARCH_FALLBACK` (OpenRouter native online search by default).
+- Authentication failures do not retry. Repeated transient failures open a
+  five-minute circuit breaker so later calls go directly to the fallback.
+- Successful responses are cached for one hour by normalized prompt and
+  provider route. Cache files stay under ignored private `logs/research/cache`.
 - Each lane shares the question deadline and call limiter.
 
 **Output**
@@ -253,6 +260,10 @@ forecasting-tools 0.2.92 before relying on rules documented for 0.3.1.
 - Current adaptive controls: `BOT_ENABLE_REVIEW`, `BOT_DISAGREEMENT`,
   `BOT_CALL_TIMEOUT_SECONDS`, `BOT_QUESTION_BUDGET_SECONDS` and
   `BOT_MAX_OUTPUT_TOKENS`. `BOT_ENABLE_DURABLE_LOGGING` defaults to true.
+- Research reliability controls include `BOT_RESEARCH_FALLBACK`,
+  `BOT_RESEARCH_RETRY_COUNT`, `BOT_RESEARCH_RETRY_DELAY_SECONDS`,
+  `BOT_RESEARCH_CACHE_TTL_SECONDS`, `BOT_RESEARCH_BREAKER_FAILURES` and
+  `BOT_RESEARCH_BREAKER_SECONDS`.
 - Upgrade feature flags are centralized in `upgrade_config.py`; no Phase 3-7
   behaviour is enabled in Phase 0.
 
