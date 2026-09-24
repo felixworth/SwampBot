@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+import logging
 import math
 import os
 import time
@@ -13,10 +15,15 @@ from main import SummerTemplateBot2026
 from forecasting_tools import (
     AskNewsSearcher, GeneralLlm, SmartSearcher, BinaryQuestion, DateQuestion,
     NumericQuestion, MultipleChoiceQuestion, NumericDistribution,
-    Percentile, PredictedOptionList, ReasonedPrediction,
+    Percentile, PredictedOptionList, ReasonedPrediction, MonetaryCostManager,
+)
+from forecast_logging import (
+    question_fields, safe_append_event, store_research, to_jsonable,
 )
 from forecast_logic import ForecastEngine, date_number
-from upgrade_config import feature_flags
+from upgrade_config import UPGRADE, feature_flags
+
+logger = logging.getLogger(__name__)
 
 
 class AdaptiveForecastBot(SummerTemplateBot2026):
@@ -52,6 +59,14 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         self._model_names = names
         self._call_limiter = asyncio.Semaphore(4)
         self._deadlines = {}
+        self._logging_enabled = (
+            os.getenv('BOT_ENABLE_DURABLE_LOGGING', 'true').lower() == 'true'
+        )
+        self._call_context = contextvars.ContextVar(
+            f'adaptive_call_context_{id(self)}', default=None
+        )
+        self._call_telemetry = {}
+        self._research_hashes = {}
         self._engine = ForecastEngine(
             self._invoke_analyst, self._search,
             analyst_count=len(names),
@@ -67,18 +82,57 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                       disagreement=self._engine.disagreement,
                       call_timeout=self.call_timeout, question_budget=self.question_budget,
                       max_output_tokens=self.max_output_tokens,
+                      durable_logging=self._logging_enabled,
                       upgrade_flags=feature_flags())
         return config
 
+    def _context_for_question(self, question):
+        return {'key': id(question), **question_fields(question)}
+
+    async def _tracked_call(self, *, kind, model, call):
+        if not self._logging_enabled:
+            async with self._call_limiter:
+                return await call()
+
+        context = self._call_context.get()
+        started = time.monotonic()
+        error = None
+        with MonetaryCostManager() as cost_manager:
+            try:
+                async with self._call_limiter:
+                    return await call()
+            except BaseException as exc:
+                error = type(exc).__name__
+                raise
+            finally:
+                if context is not None:
+                    self._call_telemetry.setdefault(context['key'], []).append({
+                        'kind': kind,
+                        'model': model,
+                        'cost_usd': cost_manager.current_usage,
+                        'latency_s': time.monotonic() - started,
+                        'error': error,
+                    })
+
     async def _invoke_analyst(self, index, prompt):
-        async with self._call_limiter:
-            return await self._analysts[index].invoke(prompt)
+        if 'Audit these forecasts' in prompt:
+            kind = 'review'
+        elif 'Your own original forecast:' in prompt:
+            kind = 'revision'
+        else:
+            kind = 'initial_forecast'
+        return await self._tracked_call(
+            kind=kind,
+            model=self._model_names[index],
+            call=lambda: self._analysts[index].invoke(prompt),
+        )
 
     async def _search(self, prompt):
         # Provider routing matches the original template. Search-enabled models
         # must be configured explicitly; an ordinary LLM is NOT a web searcher.
-        async with self._call_limiter:
-            researcher = self.get_llm('researcher')
+        researcher = self.get_llm('researcher')
+
+        async def invoke_researcher():
             if isinstance(researcher, GeneralLlm):
                 return await researcher.invoke(prompt)
             if not researcher or researcher in ('None', 'no_research'):
@@ -92,6 +146,11 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     use_advanced_filters=False,
                 ).invoke(prompt)
             return await self.get_llm('researcher', 'llm').invoke(prompt)
+
+        model = getattr(researcher, 'model', None) or str(researcher)
+        return await self._tracked_call(
+            kind='research', model=model, call=invoke_researcher
+        )
 
     def _deadline(self, question):
         key = id(question)
@@ -134,6 +193,14 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         return spec
 
     async def run_research(self, question):
+        context = self._context_for_question(question)
+        token = self._call_context.set(context)
+        try:
+            return await self._run_research_lanes(question, context)
+        finally:
+            self._call_context.reset(token)
+
+    async def _run_research_lanes(self, question, context):
         deadline = self._deadline(question)
         # Share the same overall budget across conditional branches.
         if hasattr(question, 'question_yes'):
@@ -161,7 +228,32 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         for i, result in enumerate(results):
             text = f'RESEARCH_FAILED: {type(result).__name__}' if isinstance(result, BaseException) else str(result)
             sections.append(f'### Research lane {i + 1}\n{text[:24000]}')
-        return '\n\n'.join(sections)
+        report = '\n\n'.join(sections)
+        if self._logging_enabled:
+            digest = store_research(report)
+            self._research_hashes[context['key']] = digest
+            if hasattr(question, 'question_yes'):
+                for name in ('parent', 'child', 'question_yes', 'question_no'):
+                    self._research_hashes[id(getattr(question, name))] = digest
+            telemetry = list(self._call_telemetry.get(context['key'], []))
+            safe_append_event({
+                'event': 'research_complete',
+                **{key: value for key, value in context.items() if key != 'key'},
+                'content_hash': digest,
+                'lane_count': len(results),
+                'failed_lanes': [
+                    i + 1 for i, result in enumerate(results)
+                    if isinstance(result, BaseException)
+                ],
+                'calls': telemetry,
+                'tracked_call_cost_usd': sum(
+                    call.get('cost_usd', 0) or 0 for call in telemetry
+                ),
+            })
+            if hasattr(question, 'question_yes'):
+                self._call_telemetry.pop(context['key'], None)
+                self._research_hashes.pop(context['key'], None)
+        return report
 
     def _convert(self, data, question):
         if isinstance(question, BinaryQuestion):
@@ -196,18 +288,74 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         return NumericDistribution.from_question(mixed, question)
 
     async def _adaptive_forecast(self, question, research):
-        result = await self._engine.run(self._spec(question), research, self._deadline(question),
-                                       validate=lambda c: self._convert(c, question))
-        value = self._combine(result.candidates, question)
-        explanation = ('## Adaptive forecast\n'
-                       'Equal-weight aggregation; numeric/date distributions mixed on the SDK CDF grid. '
-                       'SDK probability limits and distribution standardization still apply.\n'
-                       f'Model roster: {", ".join(self._model_names)}\n'
-                       '### Initial forecasts\n' + json.dumps(result.initial_candidates, indent=2)
-                       + '\n### Review decisions\n' + '\n'.join(result.notes)
-                       + '\n### Evidence audit\n' + (result.review or 'No review conducted.')
-                       + '\n### Final analyst forecasts\n' + json.dumps(result.candidates, indent=2))
-        return ReasonedPrediction(prediction_value=value, reasoning=explanation)
+        context = self._context_for_question(question)
+        token = self._call_context.set(context)
+        started = time.monotonic()
+        try:
+            result = await self._engine.run(
+                self._spec(question), research, self._deadline(question),
+                validate=lambda c: self._convert(c, question))
+            value = self._combine(result.candidates, question)
+            explanation = ('## Adaptive forecast\n'
+                           'Equal-weight aggregation; numeric/date distributions mixed on the SDK CDF grid. '
+                           'SDK probability limits and distribution standardization still apply.\n'
+                           f'Model roster: {", ".join(self._model_names)}\n'
+                           '### Initial forecasts\n' + json.dumps(result.initial_candidates, indent=2)
+                           + '\n### Review decisions\n' + '\n'.join(result.notes)
+                           + '\n### Evidence audit\n' + (result.review or 'No review conducted.')
+                           + '\n### Final analyst forecasts\n' + json.dumps(result.candidates, indent=2))
+            if self._logging_enabled:
+                telemetry = list(self._call_telemetry.get(context['key'], []))
+                research_hash = (
+                    self._research_hashes.get(context['key'])
+                    or store_research(research)
+                )
+                safe_append_event({
+                    'event': 'forecast_reasoning_complete',
+                    **{key: item for key, item in context.items() if key != 'key'},
+                    'model_roster': self._model_names,
+                    'research_hash': research_hash,
+                    'initial_candidates': result.initial_candidates,
+                    'final_candidates': result.candidates,
+                    'review_notes': result.notes,
+                    'review_hash': (
+                        store_research(
+                            result.review,
+                            os.path.join(UPGRADE['research_dir'], 'reviews'),
+                        )
+                        if result.review else None
+                    ),
+                    'prediction': to_jsonable(value),
+                    'calls': telemetry,
+                    'tracked_call_cost_usd': sum(
+                        call.get('cost_usd', 0) or 0 for call in telemetry
+                    ),
+                    'latency_s': time.monotonic() - started,
+                })
+            return ReasonedPrediction(
+                prediction_value=value, reasoning=explanation
+            )
+        except BaseException as exc:
+            if self._logging_enabled:
+                telemetry = list(self._call_telemetry.get(context['key'], []))
+                safe_append_event({
+                    'event': 'forecast_reasoning_failed',
+                    **{key: item for key, item in context.items() if key != 'key'},
+                    'model_roster': self._model_names,
+                    'research_hash': self._research_hashes.get(context['key']),
+                    'calls': telemetry,
+                    'tracked_call_cost_usd': sum(
+                        call.get('cost_usd', 0) or 0 for call in telemetry
+                    ),
+                    'latency_s': time.monotonic() - started,
+                    'error_type': type(exc).__name__,
+                    'error': str(exc)[:4000],
+                })
+            raise
+        finally:
+            self._call_context.reset(token)
+            self._call_telemetry.pop(context['key'], None)
+            self._research_hashes.pop(context['key'], None)
 
     async def _run_forecast_on_binary(self, question, research):
         return await self._adaptive_forecast(question, research)

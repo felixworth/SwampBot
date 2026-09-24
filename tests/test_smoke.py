@@ -105,6 +105,7 @@ def test_full_dry_run_pipeline_never_posts(kind, question):
                 "BOT_MODELS": "openrouter/openai/gpt-4o",
                 "BOT_ENABLE_REVIEW": "false",
                 "BOT_RESEARCHER": "no_research",
+                "BOT_ENABLE_DURABLE_LOGGING": "false",
             },
         ):
             bot = AdaptiveForecastBot(

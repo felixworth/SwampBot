@@ -27,7 +27,8 @@ def payload(kind):
 class SDKTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.env = patch.dict(os.environ, {'BOT_MODELS': 'openrouter/openai/gpt-4o,openrouter/openai/gpt-4o',
-                                         'BOT_ENABLE_REVIEW': 'false', 'BOT_RESEARCHER': 'no_research'})
+                                         'BOT_ENABLE_REVIEW': 'false', 'BOT_RESEARCHER': 'no_research',
+                                         'BOT_ENABLE_DURABLE_LOGGING': 'false'})
         self.env.start()
         self.addCleanup(self.env.stop)
 

@@ -12,6 +12,8 @@ the rollback/template implementation; production automation now calls
   replaces research plus binary, multiple-choice, numeric and date forecasting.
 - `forecast_logic.py`: provider-independent prompts, strict output validation,
   review triggers, one optional evidence search and one revision round.
+- `forecast_logging.py`: failure-safe JSONL events, per-call cost/latency/error
+  telemetry and content-addressed private research files.
 - `main.py`: original `SummerTemplateBot2026` and inherited SDK integration.
 - `main_with_no_framework.py`: standalone reference implementation, not used by
   the adaptive workflow.
@@ -250,9 +252,23 @@ forecasting-tools 0.2.92 before relying on rules documented for 0.3.1.
 - Research route: `BOT_RESEARCHER`.
 - Current adaptive controls: `BOT_ENABLE_REVIEW`, `BOT_DISAGREEMENT`,
   `BOT_CALL_TIMEOUT_SECONDS`, `BOT_QUESTION_BUDGET_SECONDS` and
-  `BOT_MAX_OUTPUT_TOKENS`.
+  `BOT_MAX_OUTPUT_TOKENS`. `BOT_ENABLE_DURABLE_LOGGING` defaults to true.
 - Upgrade feature flags are centralized in `upgrade_config.py`; no Phase 3-7
   behaviour is enabled in Phase 0.
+
+## Durable telemetry
+
+- `logs/forecasts.jsonl` receives append-only research, reasoning, final-report
+  and failure events.
+- `logs/research/<content-hash>.txt` stores each distinct research report once;
+  review text is stored under `logs/research/reviews/`.
+- Provider calls record model/route, stage, tracked cost, latency and error
+  type. Final SDK reports separately record the framework's total estimated
+  cost and latency.
+- Logging and research persistence are wrapped so filesystem failures cannot
+  fail a forecast.
+- The adaptive test and production workflows upload `logs/` as private
+  GitHub Actions artifacts retained for 90 days. Logs remain excluded from Git.
 
 ## Known mismatches and constraints
 

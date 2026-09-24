@@ -6,6 +6,7 @@ import os
 
 from adaptive_bot import AdaptiveForecastBot
 from bot_helpers import check_environment, print_startup_banner, print_run_summary_banner
+from forecast_logging import log_report_batch
 from forecasting_tools import ForecastReport, MetaculusClient
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,14 @@ async def run(args):
             reports.extend(await bot.forecast_on_tournament(target, return_exceptions=True))
     if not args.publish:
         log_dry_run_payloads(reports)
+    config = bot.get_config()
+    if config.get('durable_logging'):
+        log_report_batch(
+            reports,
+            run_mode=args.mode,
+            published=args.publish,
+            model_roster=list(config['model_roster']),
+        )
     bot.log_report_summary(reports, raise_errors=False)
     print_run_summary_banner(reports, will_publish=args.publish)
     return 1 if any(isinstance(r, BaseException) for r in reports) else 0
