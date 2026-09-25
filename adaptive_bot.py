@@ -24,6 +24,9 @@ from forecast_logging import (
     question_fields, safe_append_event, store_research, to_jsonable,
 )
 from forecast_logic import ForecastEngine, date_number
+from forecast_upgrades.aggregation import aggregate_binary, aggregate_mc, normalize_with_floor
+from forecast_upgrades.calibration import PlattParams, cap, mc_temperature_apply
+import research_v2
 from upgrade_config import UPGRADE, feature_flags
 
 logger = logging.getLogger(__name__)
@@ -445,10 +448,169 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 for key in ('parent', 'child', 'question_yes', 'question_no')}
         return spec
 
+    def _research_v2_enabled(self):
+        if not (UPGRADE.get('FF_RESOLUTION_SPEC') or UPGRADE.get('FF_RESEARCH_V2')):
+            return False
+        researcher = os.getenv('BOT_RESEARCHER', '').strip()
+        return bool(researcher) and researcher not in ('None', 'no_research')
+
+    async def _invoke_cheap(self, kind, prompt):
+        if self._fallback_researcher is not None:
+            return await self._tracked_call(
+                kind=kind,
+                model=self._research_fallback,
+                call=lambda: self._fallback_researcher.invoke(prompt),
+            )
+        return await self._tracked_call(
+            kind=kind,
+            model=self._model_names[0],
+            call=lambda: self._analysts[0].invoke(prompt),
+        )
+
+    async def _search_named_route(self, route, prompt):
+        primary = self.get_llm('researcher')
+        if route == primary:
+            return await self._search(prompt)
+        return await self._tracked_call(
+            kind='research',
+            model=self._research_route_label(route),
+            call=lambda: self._invoke_research_route(route, prompt),
+            details={'provider_role': 'research_v2'},
+        )
+
+    async def _run_research_v2(self, question, context):
+        spec_input = self._spec(question)
+        spec = research_v2.validate_resolution_spec(
+            await self._invoke_cheap('resolution_spec', research_v2.spec_prompt(spec_input)),
+            close_time=getattr(question, 'close_time', None),
+        )
+        facts = [
+            research_v2.fetch_resolution_fact(url)
+            for url in research_v2.extract_source_urls(spec)
+        ]
+        cruxes = research_v2.validate_cruxes(
+            await self._invoke_cheap(
+                'cruxes', research_v2.crux_prompt(spec_input, spec, facts)
+            )
+        )
+        primary = self.get_llm('researcher')
+        providers_used = []
+        crux_findings = []
+        query_count = 0
+        max_queries = int(UPGRADE['research_max_queries'])
+        for crux in cruxes:
+            findings = []
+            for query in crux['search_queries']:
+                if query_count >= max_queries:
+                    break
+                route = primary if query_count % 2 == 0 else (
+                    self._research_fallback or primary
+                )
+                prompt = (
+                    'Investigate this factual gap. Give dated sources, distinguish '
+                    'confirmed facts from inference, deduplicate syndicated reports. '
+                    'Do not forecast.\nQUERY: ' + query
+                    + '\nQUESTION DATA:\n' + json.dumps(spec_input, default=str)
+                )
+                try:
+                    text = await self._search_named_route(route, prompt)
+                    if not self._research_response_is_useful(text):
+                        raise ValueError('Research response was not useful')
+                    findings.append({
+                        'query': query,
+                        'provider': self._research_route_label(route),
+                        'text': text[:8000],
+                    })
+                    providers_used.append(self._research_route_label(route))
+                except Exception as exc:
+                    findings.append({
+                        'query': query,
+                        'provider': self._research_route_label(route),
+                        'text': 'SEARCH_FAILED: ' + self._sanitized_error(exc),
+                    })
+                query_count += 1
+            crux_findings.append({**crux, 'findings': findings})
+        unique_providers = sorted(set(providers_used))
+        if len(unique_providers) < int(UPGRADE['research_min_providers']):
+            raise RuntimeError(
+                'Research v2 used fewer than '
+                + str(UPGRADE['research_min_providers'])
+                + ' providers'
+            )
+        try:
+            claims = research_v2.validate_claims(
+                await self._invoke_cheap(
+                    'claims', research_v2.claims_prompt(crux_findings)
+                )
+            )
+        except Exception:
+            claims = []
+        outside = research_v2.similar_questions(
+            getattr(question, 'question_text', '') or '',
+            research_v2.load_log_records(),
+        )
+        unanswered = [
+            crux['question']
+            for crux in crux_findings
+            if not any(
+                finding.get('text') and not str(finding.get('text')).startswith('SEARCH_FAILED')
+                for finding in crux.get('findings', [])
+            )
+        ]
+        unanswered.extend(spec.get('ambiguities') or [])
+        brief = research_v2.format_research_brief(
+            spec, facts, outside, crux_findings, claims, unanswered
+        )
+        if self._logging_enabled:
+            digest = store_research(brief)
+            self._research_hashes[context['key']] = digest
+            if hasattr(question, 'question_yes'):
+                for name in ('parent', 'child', 'question_yes', 'question_no'):
+                    self._research_hashes[id(getattr(question, name))] = digest
+            telemetry = list(self._call_telemetry.get(context['key'], []))
+            safe_append_event({
+                'event': 'research_complete',
+                **{key: value for key, value in context.items() if key != 'key'},
+                'content_hash': digest,
+                'research_version': 2,
+                'lane_count': len(crux_findings),
+                'failed_lanes': [],
+                'providers': unique_providers,
+                'crux_count': len(cruxes),
+                'query_count': query_count,
+                'claim_count': len(claims),
+                'resolution_spec': spec,
+                'calls': telemetry,
+                'tracked_call_cost_usd': sum(
+                    call.get('cost_usd', 0) or 0 for call in telemetry
+                ),
+            })
+            if hasattr(question, 'question_yes'):
+                self._call_telemetry.pop(context['key'], None)
+                self._research_hashes.pop(context['key'], None)
+        return brief
+
     async def run_research(self, question):
         context = self._context_for_question(question)
         token = self._call_context.set(context)
+        if hasattr(question, 'question_yes'):
+            deadline = self._deadline(question)
+            for name in ('parent', 'child', 'question_yes', 'question_no'):
+                self._deadlines[id(getattr(question, name))] = deadline
         try:
+            if self._research_v2_enabled():
+                try:
+                    return await self._run_research_v2(question, context)
+                except Exception:
+                    logger.exception(
+                        'Research v2 failed; falling back to two-lane research'
+                    )
+                    if self._logging_enabled:
+                        safe_append_event({
+                            'event': 'research_v2_fallback',
+                            **{key: value for key, value in context.items() if key != 'key'},
+                            'flag': 'research_v2_failed',
+                        })
             return await self._run_research_lanes(question, context)
         finally:
             self._call_context.reset(token)
@@ -510,8 +672,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
 
     def _convert(self, data, question):
         if isinstance(question, BinaryQuestion):
-            # Preserve the supplied template's 1–99% clipping policy.
-            return max(.01, min(.99, data['probability']))
+            return float(data['probability'])
         if isinstance(question, MultipleChoiceQuestion):
             return PredictedOptionList(predicted_options=[
                 {'option_name': option, 'probability': data['probabilities'][option]}
@@ -523,14 +684,59 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         result.get_cdf()  # Force full SDK validation before a candidate is accepted.
         return result
 
-    def _combine(self, candidates, question):
+    @staticmethod
+    def _is_minibench(question):
+        slugs = getattr(question, 'tournament_slugs', None) or []
+        return any('minibench' in str(slug).lower() for slug in slugs)
+
+    def _calibration_payload(self):
+        path = Path(UPGRADE['calibration_path'])
+        if not UPGRADE.get('FF_CALIBRATION') or not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            logger.exception('Could not read calibration.json; using identity')
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _postprocess_binary(self, probability, question):
+        value = float(probability)
+        payload = self._calibration_payload()
+        if payload and payload.get('applied'):
+            value = float(PlattParams(
+                a=float(payload.get('a', 1.0)),
+                b=float(payload.get('b', 0.0)),
+            ).apply(value))
+        lo, hi = (
+            UPGRADE['binary_cap_auto_resolved']
+            if self._is_minibench(question)
+            else UPGRADE['binary_cap']
+        )
+        return cap(value, lo, hi)
+
+    def _aggregate(self, candidates, question):
         values = [self._convert(c, question) for c in candidates]
         if isinstance(question, BinaryQuestion):
-            return fmean(values)
+            raw = aggregate_binary(values, UPGRADE['binary_aggregation'])
+            return raw, self._postprocess_binary(raw, question)
         if isinstance(question, MultipleChoiceQuestion):
-            return PredictedOptionList(predicted_options=[
-                {'option_name': name, 'probability': fmean(v.to_dict()[name] for v in values)}
-                for name in question.options])
+            vectors = [
+                [converted.to_dict()[name] for name in question.options]
+                for converted in values
+            ]
+            raw = aggregate_mc(vectors, 'mean', floor=UPGRADE['mc_floor'])
+            final = list(raw)
+            payload = self._calibration_payload()
+            if payload and payload.get('mc_temperature') is not None:
+                final = normalize_with_floor(
+                    mc_temperature_apply(final, float(payload['mc_temperature'])),
+                    UPGRADE['mc_floor'],
+                )
+            return raw, PredictedOptionList(predicted_options=[
+                {'option_name': name, 'probability': probability}
+                for name, probability in zip(question.options, final)
+            ])
         # A linear mixture of CDFs preserves within-model and between-model uncertainty.
         cdfs = [v.get_cdf() for v in values]
         axis = [point.value for point in cdfs[0]]
@@ -538,7 +744,11 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             raise ValueError('SDK numeric CDF axes differ')
         mixed = [Percentile(value=x, percentile=fmean(cdf[i].percentile for cdf in cdfs))
                  for i, x in enumerate(axis)]
-        return NumericDistribution.from_question(mixed, question)
+        final = NumericDistribution.from_question(mixed, question)
+        return final, final
+
+    def _combine(self, candidates, question):
+        return self._aggregate(candidates, question)[1]
 
     async def _adaptive_forecast(self, question, research):
         context = self._context_for_question(question)
@@ -548,10 +758,10 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             result = await self._engine.run(
                 self._spec(question), research, self._deadline(question),
                 validate=lambda c: self._convert(c, question))
-            value = self._combine(result.candidates, question)
+            aggregate_raw, value = self._aggregate(result.candidates, question)
             explanation = ('## Adaptive forecast\n'
-                           'Equal-weight aggregation; numeric/date distributions mixed on the SDK CDF grid. '
-                           'SDK probability limits and distribution standardization still apply.\n'
+                           'Median binary aggregation with last-step caps; multiple-choice mean with a floor. '
+                           'Numeric/date distributions mixed on the SDK CDF grid.\n'
                            f'Model roster: {", ".join(self._model_names)}\n'
                            '### Initial forecasts\n' + json.dumps(result.initial_candidates, indent=2)
                            + '\n### Review decisions\n' + '\n'.join(result.notes)
@@ -578,6 +788,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                         )
                         if result.review else None
                     ),
+                    'aggregate_raw': to_jsonable(aggregate_raw),
+                    'final_submitted': to_jsonable(value),
                     'prediction': to_jsonable(value),
                     'calls': telemetry,
                     'tracked_call_cost_usd': sum(

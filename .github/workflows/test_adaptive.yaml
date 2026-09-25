@@ -18,6 +18,11 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
       - run: poetry install --no-interaction --no-root
+      - name: Reject leftover gpt-4o roster
+        env:
+          BOT_MODELS: ${{ vars.BOT_MODELS }}
+        run: |
+          python -c "import os,sys; m=os.environ.get('BOT_MODELS','').strip(); sys.exit('BOT_MODELS is missing or still uses gpt-4o') if (not m or 'gpt-4o' in m) else None"
       - name: Offline tests
         run: poetry run python -m unittest discover -s tests -v
       - name: Testing-area dry run (uses model credits, no submission)

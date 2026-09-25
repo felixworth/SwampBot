@@ -67,8 +67,13 @@ confirm the raw API field before changing this path.
 
 **Process**
 
-- Two concurrent lanes: current/resolution evidence and historical/base-rate
-  evidence.
+- When `FF_RESOLUTION_SPEC` and `FF_RESEARCH_V2` are on and a researcher is
+  configured, `research_v2` builds a resolution spec, fetches listed sources,
+  searches 3-5 cruxes across AskNews and the online fallback, merges claims by
+  independence group, and formats a fixed brief. Failures fall back to the
+  two-lane path.
+- Two concurrent lanes remain the fallback and the `no_research` path:
+  current/resolution evidence and historical/base-rate evidence.
 - Provider routing supports AskNews preconfigured routes,
   `smart-searcher/<model>`, a search-enabled LLM, or explicit `no_research`.
 - Responses must contain substantive text and at least one source URL.
@@ -82,7 +87,8 @@ confirm the raw API field before changing this path.
 
 **Output**
 
-- One text research report with two labelled sections. Provider failures become
+- A research-v2 brief with spec, facts, outside view, cruxes, claims and
+  uncertainties; or the two-lane fallback report. Provider failures become
   explicit `RESEARCH_FAILED` markers rather than disappearing.
 
 ## B3 - Independent model forecasts
@@ -195,8 +201,10 @@ therefore use the numeric path.
 
 **Process/output**
 
-- Binary: arithmetic mean after the existing 1%-99% clip.
-- Multiple choice: per-option arithmetic mean; the SDK normalizes.
+- Binary: median of member probabilities, optional Platt scaling when
+  `calibration.json` has `applied=true`, then 2%-98% caps (3%-97% on MiniBench).
+- Multiple choice: per-option mean with a 1% floor, optional temperature
+  scaling from `calibration.json`.
 - Numeric/discrete/date: linear mixture of full member CDFs on the common SDK
   grid, then `NumericDistribution.from_question`.
 

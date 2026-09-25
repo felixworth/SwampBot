@@ -149,8 +149,10 @@ def test_full_dry_run_pipeline_never_posts(kind, question):
 def test_upgrade_features_are_loaded_but_inert():
     flags = feature_flags()
     assert flags["FF_CALIBRATION"] is True
+    assert flags["FF_RESOLUTION_SPEC"] is True
+    assert flags["FF_RESEARCH_V2"] is True
     assert all(
         enabled is False
         for name, enabled in flags.items()
-        if name != "FF_CALIBRATION"
+        if name not in {"FF_CALIBRATION", "FF_RESOLUTION_SPEC", "FF_RESEARCH_V2"}
     )

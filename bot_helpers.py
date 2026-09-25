@@ -75,12 +75,30 @@ def ensure_asyncio_compatibility() -> None:
         asyncio.current_task = python_current_task
 
 
+def reject_legacy_models(models: str | None = None) -> None:
+    """Refuse empty or leftover gpt-4o rosters on the live adaptive path."""
+    roster = (models if models is not None else os.getenv("BOT_MODELS", "")).strip()
+    if not roster:
+        raise ValueError("BOT_MODELS is missing")
+    if "gpt-4o" in roster:
+        raise ValueError(
+            "BOT_MODELS still includes gpt-4o. Set the current two-model mix "
+            "before running the adaptive bot."
+        )
+
+
 def check_environment(strict: bool = True) -> None:
     """
     Verify METACULUS_TOKEN is set; warn if no LLM key is configured. On
     failure with strict=True, exits the process with a non-zero status.
     """
     problems: list[str] = []
+
+    if os.getenv("BOT_MODELS", "").strip():
+        try:
+            reject_legacy_models()
+        except ValueError as exc:
+            problems.append(str(exc))
 
     if not _is_real_env("METACULUS_TOKEN"):
         problems.append(

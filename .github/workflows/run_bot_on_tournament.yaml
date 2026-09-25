@@ -2,8 +2,6 @@ name: Forecast on new AI tournament questions
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "7,27,47 * * * *" # every 20 min, offset off the hour. Make sure to skip already-forecasted questions!
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -37,6 +35,11 @@ jobs:
       #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
+      - name: Reject leftover gpt-4o roster
+        env:
+          BOT_MODELS: ${{ vars.BOT_MODELS }}
+        run: |
+          python -c "import os,sys; m=os.environ.get('BOT_MODELS','').strip(); sys.exit('BOT_MODELS is missing or still uses gpt-4o') if (not m or 'gpt-4o' in m) else None"
       - name: Run bot
         run: |
           poetry run python run_adaptive.py --mode tournament --include-minibench --publish
