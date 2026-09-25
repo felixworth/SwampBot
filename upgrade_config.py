@@ -16,6 +16,12 @@ UPGRADE = {
     "FF_NUMERIC_V2": False,
     "FF_MARKET_ANCHOR": False,
     "FF_CALIBRATION": True,
+    "FF_NUMERIC_TAILS": True,
+    "FF_LOGIT_SHRINK": True,
+    "FF_CONDITIONAL_CAP": True,
+    "FF_SEPARATE_REVIEWER": True,
+    "FF_ROLE_ROTATION": True,
+    "FF_NUMERIC_LOGISTIC": False,
 
     # Reliability and logging targets for later phases.
     "run_every_minutes": 20,
@@ -67,7 +73,12 @@ UPGRADE = {
     "market_max_deadline_gap_days": 7,
 
     # Calibration and caps.
-    "calibration_path": "calibration.json",
+    "calibration_path": "data/calibration.json",
+    "history_glob": "data/runs/**/*.jsonl",
+    "outcomes_path": "data/outcomes.jsonl",
+    "spend_floor_usd": 1.0,
+    "shrink_prior_p": 0.35,
+    "shrink_tau": 2.0,
     "calibration_min_resolved": 100,
     "binary_cap": (0.02, 0.98),
     "binary_cap_auto_resolved": (0.03, 0.97),

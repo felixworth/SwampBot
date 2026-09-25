@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -80,6 +81,7 @@ def sync_log(path: Path) -> dict[str, int]:
     cache: dict[int, tuple[object | None, bool]] = {}
     updated = 0
     skipped = 0
+    outcomes = []
     for record in records:
         question_id = record.get("question_id")
         if question_id is None:
@@ -98,14 +100,23 @@ def sync_log(path: Path) -> dict[str, int]:
         if skip or outcome is None:
             skipped += 1
             continue
-        record["outcome"] = outcome
+        outcomes.append({
+            "question_id": question_id,
+            "outcome": outcome,
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+        })
         updated += 1
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    destination = Path(UPGRADE["outcomes_path"])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    existing = destination.read_text(encoding="utf-8") if destination.exists() else ""
+    known = set()
+    for line in existing.splitlines():
+        if line.strip():
+            known.add(json.loads(line).get("question_id"))
+    with destination.open("a", encoding="utf-8") as handle:
+        for row in outcomes:
+            if row["question_id"] not in known:
+                handle.write(json.dumps(row) + "\n")
     return {"records": len(records), "updated": updated, "skipped": skipped}
 
 

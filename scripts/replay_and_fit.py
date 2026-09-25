@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run from anywher
 from forecast_upgrades import aggregation as ag
 from forecast_upgrades import calibration as cal
 from forecast_upgrades import evaluation as ev
+from forecast_upgrades.advanced import HierarchicalPlatt
 from forecast_upgrades.logging_schema import load_records, members_at_stage
 
 
@@ -32,7 +33,8 @@ def build_rows(path: str) -> list[dict]:
         if not init:
             continue
         rev = members_at_stage(r, "revised") or init
-        rows.append({"members": init, "revised": rev, "outcome": int(r["outcome"]), "segment": r.get("segment")})
+        rows.append({"members": init, "revised": rev, "outcome": int(r["outcome"]),
+                     "segment": r.get("segment"), "source": r.get("source") or "unknown"})
     return rows
 
 
@@ -64,6 +66,10 @@ def main() -> None:
         "median+cap": lambda r: cal.cap(agg(r["members"]), lo, hi),
         "median+platt+cap": lambda r: cal.cap(float(prm.apply(agg(r["members"]))), lo, hi),
     }
+    if len({r["source"] for r in train}) >= 2:
+        hp = HierarchicalPlatt().fit([agg(r["members"]) for r in train], [r["outcome"] for r in train],
+                                     [r["source"] for r in train])
+        pipelines["median+hier_platt+cap"] = lambda r: cal.cap(hp.apply(agg(r["members"]), r["source"]), lo, hi)
     res = ev.replay_binary(test, pipelines, baseline="median_initial")
     print(f"\nscored on the newest {len(test)} questions (fit on the older {len(train)}):")
     print(f"{'pipeline':<24}{'log score':>10}{'brier':>8}{'h2h vs baseline [95% CI]':>32}")

@@ -148,14 +148,21 @@ def similar_questions(title: str, records: list[dict[str, Any]], limit: int = 3)
 
 
 def load_log_records(path: str | Path | None = None) -> list[dict[str, Any]]:
-    destination = Path(path or UPGRADE["log_path"])
-    if not destination.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in destination.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    paths = []
+    if path:
+        paths.append(Path(path))
+    else:
+        paths.append(Path(UPGRADE["log_path"]))
+        paths.extend(Path("data/runs").glob("**/*.jsonl"))
+    rows = []
+    for destination in paths:
+        if destination.exists() and destination.is_file():
+            rows.extend(
+                json.loads(line)
+                for line in destination.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+    return rows
 
 
 def extract_source_urls(spec: dict[str, Any]) -> list[str]:
@@ -174,6 +181,18 @@ def extract_source_urls(spec: dict[str, Any]) -> list[str]:
     return unique
 
 
+def _relevant_excerpt(text: str, limit: int = 4000) -> str:
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    scored = []
+    for sentence in sentences:
+        numbers = len(re.findall(r"\d", sentence))
+        if numbers or len(sentence) > 80:
+            scored.append((numbers, sentence))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    chosen = " ".join(sentence for _score, sentence in scored[:12]) or text
+    return chosen[:limit]
+
+
 def _strip_html(text: str) -> str:
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
@@ -188,9 +207,15 @@ def fetch_resolution_fact(url: str, timeout: float = 15.0) -> dict[str, Any]:
             headers={"User-Agent": "swampbot-research-v2"},
         )
         response.raise_for_status()
-        text = _strip_html(response.text)[:4000]
-        if not text:
-            raise ValueError("empty page")
+        text = _relevant_excerpt(_strip_html(response.text))
+        if len(text) < 300:
+            return {
+                "source": urlparse(url).netloc or url,
+                "value": text or None,
+                "as_of": datetime.now(timezone.utc).date().isoformat(),
+                "note": "needs_search",
+                "url": url,
+            }
         return {
             "source": urlparse(url).netloc or url,
             "value": text,

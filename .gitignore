@@ -137,6 +137,7 @@ venv.bak/
 
 # Forecast reports, research text, and replay logs can contain private reasoning.
 logs/
+data/
 
 # Spyder project settings
 .spyderproject
