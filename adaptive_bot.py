@@ -27,9 +27,14 @@ from forecast_logic import ForecastEngine, date_number
 from forecast_upgrades.advanced import (
     conditional_cap, evidence_update, hierarchical_logit_aggregate, lift_floor,
 )
-from forecast_upgrades.aggregation import aggregate_binary, aggregate_mc, blend_logodds
+from forecast_upgrades.aggregation import aggregate_binary, aggregate_mc, blend_logodds, mix_cdfs
 from forecast_upgrades.calibration import PlattParams, cap, mc_temperature_apply
+import market_anchor
 import research_v2
+import structured_track
+from forecast_upgrades.numeric import (
+    default_step_bounds, make_grid, percentiles_to_cdf, validate_cdf,
+)
 from upgrade_config import UPGRADE, feature_flags
 
 logger = logging.getLogger(__name__)
@@ -83,7 +88,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         self._research_hashes = {}
         self._research_fallback = os.getenv(
             'BOT_RESEARCH_FALLBACK',
-            'openrouter/google/gemini-3.8-flash:online',
+            'openrouter/openai/gpt-6-sol:online',
         ).strip()
         self._research_tertiary = os.getenv(
             'BOT_RESEARCH_TERTIARY',
@@ -487,16 +492,20 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         return bool(researcher) and researcher not in ('None', 'no_research')
 
     async def _invoke_cheap(self, kind, prompt):
-        if self._fallback_researcher is not None:
-            return await self._tracked_call(
-                kind=kind,
-                model=self._research_fallback,
-                call=lambda: self._fallback_researcher.invoke(prompt),
+        extractor = getattr(self, '_extractor', None)
+        if extractor is None:
+            extractor = GeneralLlm(
+                model=self._model_names[0],
+                timeout=self.call_timeout,
+                allowed_tries=1,
+                max_tokens=4000,
+                reasoning_effort='low',
             )
+            self._extractor = extractor
         return await self._tracked_call(
             kind=kind,
             model=self._model_names[0],
-            call=lambda: self._analysts[0].invoke(prompt),
+            call=lambda: extractor.invoke(prompt),
         )
 
     async def _search_named_route(self, route, prompt):
@@ -535,8 +544,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             for query in crux['search_queries']:
                 if query_count >= max_queries:
                     break
-                routes = [primary, self._research_fallback or primary, self._research_tertiary or primary]
-                route = routes[query_count % 3]
+                routes = [primary, self._research_fallback or primary]
+                route = routes[query_count % len(routes)]
                 prompt = (
                     'Investigate this factual gap. Give dated sources, distinguish '
                     'confirmed facts from inference, deduplicate syndicated reports. '
@@ -782,7 +791,10 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 {'option_name': name, 'probability': probability}
                 for name, probability in zip(question.options, final)
             ])
-        # A linear mixture of CDFs preserves within-model and between-model uncertainty.
+        if UPGRADE.get('FF_NUMERIC_V2'):
+            built = self._numeric_v2(candidates, question)
+            if built is not None:
+                return built, built
         cdfs = [v.get_cdf() for v in values]
         axis = [point.value for point in cdfs[0]]
         if any([point.value for point in cdf] != axis for cdf in cdfs):
@@ -791,6 +803,74 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                  for i, x in enumerate(axis)]
         final = NumericDistribution.from_question(mixed, question)
         return final, final
+
+    def _numeric_v2(self, candidates, question):
+        """Build each member CDF in code, mix them, and fall back if the curve is illegal."""
+        try:
+            is_date = isinstance(question, DateQuestion)
+            lower = question.lower_bound.timestamp() if is_date else question.lower_bound
+            upper = question.upper_bound.timestamp() if is_date else question.upper_bound
+            n_points = int(getattr(question, 'cdf_size', 201) or 201)
+            member_cdfs = []
+            for candidate in candidates:
+                percentiles = {}
+                for point in candidate['quantiles']:
+                    value = date_number(point['value']) if is_date else float(point['value'])
+                    percentiles[float(point['percentile'])] = value
+                member_cdfs.append(percentiles_to_cdf(
+                    percentiles, lower, upper,
+                    question.open_lower_bound, question.open_upper_bound,
+                    question.zero_point, n_points=n_points,
+                ))
+            mixed = mix_cdfs(member_cdfs)
+            errors = validate_cdf(
+                mixed, question.open_lower_bound, question.open_upper_bound,
+                *default_step_bounds(n_points),
+            )
+            if errors:
+                logger.warning('Numeric v2 CDF rejected: %s', errors)
+                return None
+            grid = make_grid(lower, upper, question.zero_point, n_points)
+            declared = [
+                Percentile(percentile=float(mixed[i]), value=float(grid[i]))
+                for i in range(len(mixed))
+            ]
+            distribution = NumericDistribution.from_question(declared, question)
+            distribution.get_cdf()
+            return distribution
+        except Exception:
+            logger.exception('Numeric v2 failed; using the SDK mixture')
+            return None
+
+    def _attach_market(self, question, candidates):
+        if not candidates:
+            return
+        try:
+            match = market_anchor.match_manifold(
+                getattr(question, 'question_text', '') or '',
+                getattr(question, 'close_time', None),
+            )
+        except Exception:
+            logger.exception('Market lookup failed; forecast left unblended')
+            return
+        if match:
+            candidates[0]['market_price'] = match['price']
+            candidates[0]['market_anchor'] = match
+
+    async def _apply_structured_track(self, result, research):
+        direct = result.candidates[0].get('probability') if result.candidates else None
+        if not isinstance(direct, (int, float)):
+            return
+        base, description = structured_track.baseline_probability(None, float(direct))
+        if base is None:
+            return
+        try:
+            raw = await self._invoke_cheap(
+                'factors', structured_track.factor_prompt(base, description, research)
+            )
+            structured_track.attach_factors(result.candidates, structured_track.parse_factors(raw))
+        except Exception:
+            logger.exception('Structured factor update skipped; ensemble forecast kept')
 
     def _blend_structured(self, direct, candidates):
         items = []
@@ -834,6 +914,10 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     'notes': ['fallback_forecast=true'],
                     'review': '',
                 })()
+            if UPGRADE.get('FF_STRUCTURED_MODELS') and isinstance(question, BinaryQuestion):
+                await self._apply_structured_track(result, research)
+            if UPGRADE.get('FF_MARKET_ANCHOR') and isinstance(question, BinaryQuestion):
+                self._attach_market(question, result.candidates)
             aggregate_raw, value = self._aggregate(result.candidates, question)
             explanation = ('## Adaptive forecast\n'
                            'Median binary aggregation with last-step caps; multiple-choice mean with a floor. '

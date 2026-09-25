@@ -157,4 +157,6 @@ def test_upgrade_features_are_loaded_but_inert():
     assert flags["FF_SEPARATE_REVIEWER"] is True
     assert flags["FF_ROLE_ROTATION"] is True
     assert flags["FF_ENSEMBLE_V2"] is False
-    assert flags["FF_STRUCTURED_MODELS"] is False
+    assert flags["FF_STRUCTURED_MODELS"] is True
+    assert flags["FF_NUMERIC_V2"] is True
+    assert flags["FF_MARKET_ANCHOR"] is True
