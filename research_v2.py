@@ -242,14 +242,14 @@ def format_research_brief(
     uncertainties: list[str],
 ) -> str:
     sections = [
-        "## Resolution spec\n" + json.dumps(spec, indent=2, default=str),
-        "## Resolution facts\n" + json.dumps(facts, indent=2, default=str),
+        "## Resolution spec\n" + json.dumps(spec, default=str, separators=(',', ':')),
+        "## Resolution facts\n" + json.dumps(facts, default=str, separators=(',', ':')),
         "## Outside view\n" + (
-            json.dumps(outside_view, indent=2, default=str)
+            json.dumps(outside_view, default=str, separators=(',', ':'))
             if outside_view else "No similar resolved questions in the local log."
         ),
-        "## Cruxes with findings\n" + json.dumps(crux_findings, indent=2, default=str),
-        "## Claims by independence group\n" + json.dumps(claims, indent=2, default=str),
+        "## Cruxes with findings\n" + json.dumps(crux_findings, default=str, separators=(',', ':')),
+        "## Claims by independence group\n" + json.dumps(claims, default=str, separators=(',', ':')),
         "## Open uncertainties\n" + (
             "\n".join(f"- {item}" for item in uncertainties) or "- None recorded"
         ),

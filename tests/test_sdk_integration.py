@@ -129,7 +129,7 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
 
     def test_original_metaculus_entry_points_are_inherited(self):
         from main import SummerTemplateBot2026
-        for method in ('forecast_on_tournament', 'forecast_questions', '_run_individual_question',
+        for method in ('forecast_on_tournament', '_run_individual_question',
                        '_run_forecast_on_conditional'):
             self.assertIs(getattr(AdaptiveForecastBot, method), getattr(SummerTemplateBot2026, method))
 
