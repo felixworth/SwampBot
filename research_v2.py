@@ -174,7 +174,11 @@ def validate_cruxes(raw: str) -> list[dict[str, Any]]:
             "id": str(crux.get("id") or f"c{index}"),
             "question": str(crux.get("question") or "").strip(),
             "why_it_matters": str(crux.get("why_it_matters") or "").strip(),
-            "search_queries": [str(query).strip() for query in queries if str(query).strip()][:2],
+            "search_queries": [
+                str(query).strip()
+                for query in queries
+                if str(query).strip()
+            ][: int(UPGRADE["research_queries_per_crux"])],
         })
         if not cleaned[-1]["question"] or not cleaned[-1]["search_queries"]:
             raise ValueError("Crux is missing a question or usable query")

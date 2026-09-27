@@ -13,6 +13,7 @@ from adaptive_bot import AdaptiveForecastBot
 from bot_helpers import check_environment, print_startup_banner, print_run_summary_banner
 from forecast_logging import log_report_batch
 from forecasting_tools import ForecastReport, MetaculusClient
+from upgrade_config import UPGRADE
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,85 @@ def log_dry_run_payloads(reports):
         logger.exception("Could not render dry-run payloads")
 
 
-def credits_below_floor() -> bool:
-    """Stop a run when OpenRouter reports less than BOT_SPEND_FLOOR_USD remaining."""
+def _analyst_count() -> int:
+    names = [part.strip() for part in os.getenv("BOT_MODELS", "").split(",") if part.strip()]
+    if UPGRADE.get("FF_ENSEMBLE_V2"):
+        samples = int(UPGRADE.get("samples_per_model", 2))
+        names = [name for name in names for _ in range(samples)]
+    return len(names)
+
+
+def _as_amount(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def key_remaining(data: dict) -> tuple[float | None, dict]:
+    """Remaining dollars, plus the response fields that decision used."""
+    used = {}
+    for key in ("limit", "limit_remaining", "usage"):
+        if key in data:
+            used[key] = data.get(key)
+    for key, value in data.items():
+        lowered = str(key).lower()
+        if any(word in lowered for word in ("reset", "period", "weekly", "monthly", "daily")):
+            used[key] = value
+    remainings = []
+    direct = _as_amount(data.get("limit_remaining"))
+    if direct is not None:
+        remainings.append(direct)
+    elif _as_amount(data.get("limit")) is not None and _as_amount(data.get("usage")) is not None:
+        remainings.append(_as_amount(data.get("limit")) - _as_amount(data.get("usage")))
+    for key, value in list(data.items()):
+        lowered = str(key).lower()
+        if isinstance(value, dict) and any(
+            word in lowered for word in ("reset", "period", "week", "month", "day")
+        ):
+            inner = _as_amount(value.get("limit_remaining"))
+            if inner is None:
+                inner = _as_amount(value.get("remaining"))
+            if inner is None and _as_amount(value.get("limit")) is not None and _as_amount(value.get("usage")) is not None:
+                inner = _as_amount(value.get("limit")) - _as_amount(value.get("usage"))
+            if inner is not None:
+                remainings.append(inner)
+                used[key] = value
+        if any(word in lowered for word in ("weekly", "monthly", "daily", "period")) and "remaining" in lowered:
+            amount = _as_amount(value)
+            if amount is not None:
+                remainings.append(amount)
+    grouped = {}
+    for key, value in data.items():
+        lowered = str(key).lower()
+        for word in ("weekly", "monthly", "daily"):
+            if word in lowered:
+                grouped.setdefault(word, {})[lowered] = (key, value)
+    for word, fields in grouped.items():
+        remaining_item = next((item for name, item in fields.items() if "remaining" in name), None)
+        if remaining_item and _as_amount(remaining_item[1]) is not None:
+            continue
+        limit_item = next(
+            (item for name, item in fields.items() if "limit" in name and "remaining" not in name),
+            None,
+        )
+        usage_item = next((item for name, item in fields.items() if "usage" in name), None)
+        if (
+            limit_item
+            and usage_item
+            and _as_amount(limit_item[1]) is not None
+            and _as_amount(usage_item[1]) is not None
+        ):
+            remainings.append(_as_amount(limit_item[1]) - _as_amount(usage_item[1]))
+    if not remainings:
+        return None, used
+    return min(remainings), used
+
+
+def credits_below_floor(analysts: int | None = None) -> bool:
+    """Stop a run when the key cannot cover the floor or one forecast round."""
     if os.getenv("BOT_ENFORCE_SPEND_FLOOR", "true").lower() != "true":
         return False
     key = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -52,11 +130,22 @@ def credits_below_floor() -> bool:
             timeout=20,
         )
         response.raise_for_status()
-        remaining = (response.json().get("data") or {}).get("limit_remaining")
+        data = response.json().get("data") or {}
+        remaining, used = key_remaining(data)
+        roster = _analyst_count() if analysts is None else analysts
+        floor = float(os.getenv("BOT_SPEND_FLOOR_USD", "1"))
+        reservation = 0.50 * roster
+        logger.info(
+            "OpenRouter key check fields=%s remaining=%s floor=%s analyst_reservation=%s analysts=%s",
+            used,
+            remaining,
+            floor,
+            reservation,
+            roster,
+        )
         if remaining is None:
             return False
-        floor = float(os.getenv("BOT_SPEND_FLOOR_USD", "1"))
-        return float(remaining) < floor
+        return remaining < floor or remaining < reservation
     except Exception:
         logger.exception("Could not read OpenRouter balance; continuing")
         return False
@@ -116,7 +205,7 @@ async def run(args):
         raise ValueError('--limit must be at least 1')
     print_startup_banner(args.mode, will_publish=args.publish)
     if credits_below_floor():
-        print("STOP: OpenRouter balance is below BOT_SPEND_FLOOR_USD. No questions were started.")
+        print("STOP: OpenRouter balance is below the spend floor or the forecast reservation. No questions were started.")
         return 0
     client = MetaculusClient()
     bot = AdaptiveForecastBot(
@@ -158,10 +247,41 @@ async def run(args):
             run_mode=args.mode,
             published=args.publish,
             model_roster=list(config['model_roster']),
+            review_triggers=bot._run_stats.get('review_triggers', 0),
+            run_stats=dict(bot._run_stats),
         )
     bot.log_report_summary(reports, raise_errors=False)
     print_run_summary_banner(reports, will_publish=args.publish)
+    _write_step_summary(bot._run_stats)
     return 1 if any(isinstance(r, BaseException) for r in reports) else 0
+
+
+def _write_step_summary(stats):
+    """Append run counts to the GitHub job page. Never fail the forecast run."""
+    path = os.getenv('GITHUB_STEP_SUMMARY')
+    if not path:
+        return
+    try:
+        lines = [
+            '## Forecast run',
+            '',
+            '| | |',
+            '| --- | ---: |',
+            f"| Questions attempted | {stats.get('attempted', 0)} |",
+            f"| Succeeded | {stats.get('succeeded', 0)} |",
+            f"| Failed | {stats.get('failed', 0)} |",
+            f"| Skipped as already forecast | {stats.get('skipped_already', 0)} |",
+            f"| Skipped for repeated failures | {stats.get('skipped_failures', 0)} |",
+            f"| Not started after provider stop | {stats.get('not_started_stop', 0)} |",
+            f"| Not started after time budget | {stats.get('not_started_budget', 0)} |",
+            f"| Review triggers | {stats.get('review_triggers', 0)} |",
+            f"| Tracked forecast-event cost (USD) | {stats.get('forecast_cost_usd', 0):.4f} |",
+            '',
+        ]
+        with open(path, 'a', encoding='utf-8') as handle:
+            handle.write('\n'.join(lines))
+    except Exception:
+        logger.exception('Could not write the GitHub step summary')
 
 
 def main():

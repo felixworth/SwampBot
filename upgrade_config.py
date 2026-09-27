@@ -9,7 +9,7 @@ UPGRADE = {
     # Feature flags. Calibration is identity-only while calibration.json is absent.
     "FF_RESOLUTION_SPEC": True,
     "FF_RESEARCH_V2": True,
-    "FF_ENSEMBLE_V2": False,
+    "FF_ENSEMBLE_V2": True,
     "FF_STRUCTURED_MODELS": True,
     "FF_TRIGGERS_V2": False,
     "FF_RESOLUTION_ROUND": False,
@@ -30,12 +30,14 @@ UPGRADE = {
     "research_dir": "logs/research",
 
     # Research v2.
-    "research_max_queries": 10,
+    "research_max_queries": 5,
+    "research_queries_per_crux": 1,
+    "research_web_queries": 1,
     "research_min_providers": 2,
     "cruxes_min": 3,
     "cruxes_max": 5,
 
-    # Ensemble v2. Placeholders are deliberately inert while FF_ENSEMBLE_V2 is false.
+    # Ensemble v2. Each configured model is asked samples_per_model times.
     "forecaster_models": [
         "PROVIDER_A_MODEL",
         "PROVIDER_B_MODEL",
@@ -72,7 +74,7 @@ UPGRADE = {
     "market_blend_weight": 0.15,
     "STRUCTURED_MODE": "shadow",
     "STRUCTURED_BLEND_WEIGHT": 0.5,
-    "bot_version": "2026-09-27-v3-shadow",
+    "bot_version": "2026-09-28-v4-ensemble",
     "market_max_deadline_gap_days": 7,
 
     # Calibration and caps.

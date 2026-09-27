@@ -102,6 +102,8 @@ def log_report_batch(
     run_mode: str,
     published: bool,
     model_roster: list[str],
+    review_triggers: int = 0,
+    run_stats: dict[str, Any] | None = None,
 ) -> None:
     """Log final SDK reports, including total tracked cost and latency."""
     for report in reports:
@@ -135,3 +137,13 @@ def log_report_batch(
                 "minor_errors": to_jsonable(getattr(report, "errors", [])),
             }
         )
+    safe_append_event(
+        {
+            "event": "run_summary",
+            "run_mode": run_mode,
+            "published": published,
+            "model_roster": model_roster,
+            "review_triggers": review_triggers,
+            **(run_stats or {}),
+        }
+    )

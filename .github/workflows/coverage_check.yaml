@@ -1,0 +1,39 @@
+name: Coverage check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "13 */6 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+      - name: Restore history
+        env:
+          DATA_REPO: ${{ vars.DATA_REPO }}
+          DATA_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: git clone --depth 1 "https://x-access-token:${DATA_TOKEN}@github.com/${DATA_REPO}.git" data || echo "no history yet"
+      - name: Check open questions
+        env:
+          METACULUS_TOKEN: ${{ secrets.METAC_API }}
+          BOT_TOURNAMENT_ID: ${{ vars.BOT_TOURNAMENT_ID }}
+        run: poetry run python scripts/coverage_check.py

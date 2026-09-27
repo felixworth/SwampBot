@@ -1,11 +1,9 @@
-name: Tournament forecast (off until the contest starts)
+name: Tournament forecast
 
 on:
   workflow_dispatch:
-  # The contest has not started. Leave this commented out, and leave the
-  # workflow disabled on GitHub, until the tournament opens.
-  # schedule:
-  #   - cron: "7,27,47 * * * *"
+  schedule:
+    - cron: "7,27,47 * * * *"
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -71,6 +69,7 @@ jobs:
           BOT_TOURNAMENT_ID: ${{ vars.BOT_TOURNAMENT_ID }}
           BOT_ENABLE_REVIEW: ${{ vars.BOT_ENABLE_REVIEW }}
           BOT_ENABLE_DURABLE_LOGGING: "true"
+          BOT_RETRY_FAILED: ${{ vars.BOT_RETRY_FAILED }}
           BOT_ENFORCE_SPEND_FLOOR: "true"
           BOT_SPEND_FLOOR_USD: "1"
       - name: Persist this run's log

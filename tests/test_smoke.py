@@ -138,7 +138,7 @@ def test_full_dry_run_pipeline_never_posts(kind, question):
             assert report.prediction is not None
             assert "Adaptive forecast" in report.explanation
             assert bot.get_config()["upgrade_flags"] == feature_flags()
-            assert bot._engine.invoke.await_count == 1
+            assert bot._engine.invoke.await_count == 2
             assert bot._search.await_count == 2
             for post_mock in post_mocks:
                 post_mock.assert_not_called()
@@ -156,7 +156,7 @@ def test_upgrade_features_are_loaded_but_inert():
     assert flags["FF_CONDITIONAL_CAP"] is True
     assert flags["FF_SEPARATE_REVIEWER"] is True
     assert flags["FF_ROLE_ROTATION"] is True
-    assert flags["FF_ENSEMBLE_V2"] is False
+    assert flags["FF_ENSEMBLE_V2"] is True
     assert flags["FF_STRUCTURED_MODELS"] is True
     assert flags["FF_NUMERIC_V2"] is True
     assert flags["FF_MARKET_ANCHOR"] is True
