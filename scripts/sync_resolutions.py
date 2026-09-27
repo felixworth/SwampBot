@@ -10,6 +10,7 @@ unresolved questions are left unchanged. Idempotent.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -120,13 +121,35 @@ def sync_log(path: Path) -> dict[str, int]:
     return {"records": len(records), "updated": updated, "skipped": skipped}
 
 
+def records_from_runs(pattern: str = "data/runs/**/*.jsonl") -> list[dict]:
+    records = []
+    for path in sorted(glob.glob(pattern, recursive=True)):
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                records.append(json.loads(line))
+    return records
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("log", nargs="?", default=UPGRADE["log_path"])
+    parser.add_argument("log", nargs="?", default=None)
     args = parser.parse_args()
-    stats = sync_log(Path(args.log))
+    if args.log:
+        stats = sync_log(Path(args.log))
+        label = args.log
+    else:
+        records = records_from_runs()
+        temporary = Path("data/runs/_sync_input.jsonl")
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            "".join(json.dumps(row) + "\n" for row in records),
+            encoding="utf-8",
+        )
+        stats = sync_log(temporary)
+        temporary.unlink(missing_ok=True)
+        label = "data/runs/**/*.jsonl"
     print(
-        f"synced {args.log}: {stats['records']} records, "
+        f"synced {label}: {stats['records']} records, "
         f"{stats['updated']} updated, {stats['skipped']} unchanged"
     )
 

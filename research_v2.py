@@ -14,6 +14,16 @@ import requests
 from forecast_logic import parse_json
 from upgrade_config import UPGRADE
 
+ARCHETYPE_DEFINITIONS = {
+    "deadline_event": "YES if a stated event happens before a deadline.",
+    "threshold_quantity": "YES if a measured number crosses a threshold.",
+    "scheduled_decision": "YES depends on a decision that already has a date.",
+    "numeric_quantity": "The resolution is a number, not yes or no.",
+    "multiple_choice": "The resolution is one of a fixed list of options.",
+    "other": "None of the types above.",
+}
+
+
 SPEC_INSTRUCTION = (
     "Extract the resolution specification from the question. Quote the "
     "resolution criteria where precision matters. List anything ambiguous "
@@ -31,20 +41,43 @@ CLAIMS_INSTRUCTION = (
 )
 
 
-def time_remaining_days(close_time, now=None) -> float | None:
-    if close_time is None:
+def time_remaining_days(deadline, now=None) -> float | None:
+    if deadline is None or deadline == "":
         return None
     current = now or datetime.now(timezone.utc)
-    if isinstance(close_time, str):
-        close_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-    if close_time.tzinfo is None:
-        close_time = close_time.replace(tzinfo=timezone.utc)
+    if isinstance(deadline, str):
+        deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    return (close_time - current).total_seconds() / 86400
+    return (deadline - current).total_seconds() / 86400
 
 
-def validate_resolution_spec(raw: str, close_time=None, now=None) -> dict[str, Any]:
+def _as_iso(value) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
+def event_deadline(spec: dict[str, Any], scheduled_resolution_time=None):
+    """Event horizon: spec deadline_utc, else scheduled resolution. Never close time."""
+    deadline = spec.get("deadline_utc")
+    if isinstance(deadline, str) and not deadline.strip():
+        deadline = None
+    if deadline is None:
+        deadline = scheduled_resolution_time
+    return deadline
+
+
+def validate_resolution_spec(
+    raw: str,
+    scheduled_resolution_time=None,
+    forecasts_close=None,
+    now=None,
+) -> dict[str, Any]:
     data = parse_json(raw)
     required = ("question_type", "archetype", "target", "resolution_sources")
     missing = [key for key in required if key not in data]
@@ -52,7 +85,14 @@ def validate_resolution_spec(raw: str, close_time=None, now=None) -> dict[str, A
         raise ValueError("Resolution spec missing: " + ", ".join(missing))
     if not isinstance(data.get("resolution_sources"), list):
         raise ValueError("resolution_sources must be a list")
-    data["time_remaining_days"] = time_remaining_days(close_time, now)
+    if data.get("archetype") not in ARCHETYPE_DEFINITIONS:
+        raise ValueError(
+            "archetype must be one of " + ", ".join(ARCHETYPE_DEFINITIONS)
+        )
+    horizon = event_deadline(data, scheduled_resolution_time)
+    data["event_deadline"] = _as_iso(horizon)
+    data["forecasts_close"] = _as_iso(forecasts_close)
+    data["time_remaining_days"] = time_remaining_days(horizon, now)
     data.setdefault("ambiguities", [])
     data.setdefault("remaining_conditions", [])
     return data
@@ -145,6 +185,43 @@ def similar_questions(title: str, records: list[dict[str, Any]], limit: int = 3)
             }))
     scored.sort(key=lambda item: item[0], reverse=True)
     return [item[1] for item in scored[:limit]]
+
+
+def join_outcomes(
+    records: list[dict[str, Any]],
+    path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Attach resolved outcomes from data/outcomes.jsonl by question id."""
+    destination = Path(path or UPGRADE["outcomes_path"])
+    outcomes: dict[Any, Any] = {}
+    if destination.exists():
+        for line in destination.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            question_id = row.get("question_id")
+            if question_id is None:
+                continue
+            outcomes[question_id] = row.get("outcome")
+            try:
+                outcomes[int(question_id)] = row.get("outcome")
+            except (TypeError, ValueError):
+                pass
+    joined = []
+    for record in records:
+        item = dict(record)
+        if item.get("outcome") is None:
+            question_id = item.get("question_id")
+            if question_id in outcomes:
+                item["outcome"] = outcomes[question_id]
+            else:
+                try:
+                    if int(question_id) in outcomes:
+                        item["outcome"] = outcomes[int(question_id)]
+                except (TypeError, ValueError):
+                    pass
+        joined.append(item)
+    return joined
 
 
 def load_log_records(path: str | Path | None = None) -> list[dict[str, Any]]:
@@ -242,6 +319,8 @@ def format_research_brief(
     uncertainties: list[str],
 ) -> str:
     sections = [
+        "## Forecasts close\n" + str(spec.get("forecasts_close") or "unknown"),
+        "## Event deadline\n" + str(spec.get("event_deadline") or "unknown"),
         "## Resolution spec\n" + json.dumps(spec, default=str, separators=(',', ':')),
         "## Resolution facts\n" + json.dumps(facts, default=str, separators=(',', ':')),
         "## Outside view\n" + (
@@ -262,6 +341,8 @@ def spec_prompt(question_spec: dict[str, Any]) -> str:
         SPEC_INSTRUCTION
         + "\nQUESTION DATA:\n"
         + json.dumps(question_spec, default=str)
+        + "\nArchetype, pick one:\n"
+        + "\n".join(f"- {name}: {text}" for name, text in ARCHETYPE_DEFINITIONS.items())
         + '\nSchema: {"question_type":"","archetype":"","target":"",'
         '"resolves_yes_if":"","deadline_utc":"","resolution_sources":'
         '[{"name":"","url":"","kind":""}],"units":"","thresholds":[],'

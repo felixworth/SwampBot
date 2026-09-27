@@ -25,12 +25,15 @@ def main() -> None:
     ap.add_argument("--outcomes", required=True, help="jsonl of {question_id, outcome}")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    events = [normalize_live_event(ev) for ev in load_jsonl(sorted(glob.glob(a.runs, recursive=True)))]
+    run_files = sorted(glob.glob(a.runs, recursive=True))
+    events = [normalize_live_event(ev) for ev in load_jsonl(run_files)]
     outcomes = {}
     if Path(a.outcomes).exists():
         for row in load_jsonl([a.outcomes]):
             outcomes[row["question_id"]] = row["outcome"]
     records = events_to_records(events, outcomes)
+    if run_files and not records:
+        raise SystemExit("run files exist but zero replay records were built")
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as fh:
         for r in records:

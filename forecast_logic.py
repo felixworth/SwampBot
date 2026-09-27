@@ -164,8 +164,10 @@ def review_reasons(candidates: list[dict], spec: dict, research: str, threshold:
         values = [c['probability'] for c in candidates]
         if max(values) - min(values) >= threshold:
             reasons.append('Material disagreement between independent probabilities')
-        if any(p <= .05 or p >= .95 for p in values):
-            reasons.append('Extreme probability requires an evidence and resolution audit')
+        from forecast_upgrades.timidity import extreme_trigger
+        split = extreme_trigger(values)
+        if split:
+            reasons.append('Split extreme: ' + split)
     elif spec['kind'] == 'multiple_choice':
         for option in spec['options']:
             values = [c['probabilities'][option] for c in candidates]
@@ -176,10 +178,15 @@ def review_reasons(candidates: list[dict], spec: dict, research: str, threshold:
             reasons.append('Near-certain outcome requires an evidence audit')
     else:
         convert = date_number if spec['kind'] == 'date' else number
-        values = [[convert(q['value']) for q in c['quantiles']] for c in candidates]
-        medians = [v[3] for v in values]
-        widths = [v[-1] - v[0] for v in values]
-        if min(widths) == 0 or max(medians) - min(medians) > max(widths) / 2:
+        def quantile_at(candidate, level):
+            for point in candidate['quantiles']:
+                if abs(number(point['percentile']) - level) < 1e-9:
+                    return convert(point['value'])
+            raise ValueError(f"Missing {level} quantile")
+        medians = [quantile_at(c, 0.5) for c in candidates]
+        widths = [quantile_at(c, 0.9) - quantile_at(c, 0.1) for c in candidates]
+        average_width = sum(widths) / len(widths)
+        if average_width == 0 or max(medians) - min(medians) > average_width / 2:
             reasons.append('Numeric/date forecasts disagree or have a collapsed interval')
     return reasons
 

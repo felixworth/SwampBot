@@ -24,7 +24,7 @@ from forecast_upgrades.advanced import HierarchicalPlatt
 from forecast_upgrades.logging_schema import load_records, members_at_stage
 
 
-def build_rows(path: str) -> list[dict]:
+def build_rows(path: str, fit_stage: str | None = None) -> list[dict]:
     recs = [r for r in load_records(path) if r["qtype"] == "binary" and r.get("outcome") in (0, 1)]
     recs.sort(key=lambda r: r["submitted_at"])
     rows = []
@@ -33,8 +33,14 @@ def build_rows(path: str) -> list[dict]:
         if not init:
             continue
         rev = members_at_stage(r, "revised") or init
-        rows.append({"members": init, "revised": rev, "outcome": int(r["outcome"]),
-                     "segment": r.get("segment"), "source": r.get("source") or "unknown"})
+        row = {"members": init, "revised": rev, "outcome": int(r["outcome"]),
+               "segment": r.get("segment"), "source": r.get("source") or "unknown"}
+        if fit_stage:
+            value = (r.get("stages") or {}).get(fit_stage)
+            if not isinstance(value, (int, float)):
+                continue
+            row["x"] = float(value)
+        rows.append(row)
     return rows
 
 
@@ -44,9 +50,11 @@ def main() -> None:
     ap.add_argument("--out", default="calibration.json")
     ap.add_argument("--min-n", type=int, default=100, help="minimum resolved questions before writing a fit")
     ap.add_argument("--cap", type=float, default=0.02)
+    ap.add_argument("--fit-stage", default=None,
+                    help="calibrate this logged stage (e.g. after_anchor) instead of the members' median")
     args = ap.parse_args()
 
-    rows = build_rows(args.log)
+    rows = build_rows(args.log, args.fit_stage)
     print(f"{len(rows)} resolved binary questions with member forecasts")
     if len(rows) < 40:
         print("Too few for comparisons; keep logging. (Plumbing looks fine if this ran.)")
@@ -55,7 +63,9 @@ def main() -> None:
     half = len(rows) // 2
     train, test = rows[:half], rows[half:]
     agg = lambda ps: ag.aggregate_binary(ps, "median")  # noqa: E731
-    prm, lam_scores = cal.fit_platt_cv([agg(r["members"]) for r in train], [r["outcome"] for r in train])
+    x_of = (lambda r: r["x"]) if args.fit_stage else (lambda r: agg(r["members"]))  # noqa: E731
+    xname = args.fit_stage or "median"
+    prm, lam_scores = cal.fit_platt_cv([x_of(r) for r in train], [r["outcome"] for r in train])
     lo, hi = args.cap, 1 - args.cap
 
     pipelines = {
@@ -64,12 +74,15 @@ def main() -> None:
         "mean_initial": lambda r: ag.aggregate_binary(r["members"], "mean"),
         "logodds_mean_initial": lambda r: ag.aggregate_binary(r["members"], "logodds_mean"),
         "median+cap": lambda r: cal.cap(agg(r["members"]), lo, hi),
-        "median+platt+cap": lambda r: cal.cap(float(prm.apply(agg(r["members"]))), lo, hi),
+        f"{xname}+platt+cap": lambda r: cal.cap(float(prm.apply(x_of(r))), lo, hi),
     }
+    if args.fit_stage:
+        pipelines[xname] = x_of
+        pipelines[f"{xname}+cap"] = lambda r: cal.cap(x_of(r), lo, hi)
     if len({r["source"] for r in train}) >= 2:
-        hp = HierarchicalPlatt().fit([agg(r["members"]) for r in train], [r["outcome"] for r in train],
+        hp = HierarchicalPlatt().fit([x_of(r) for r in train], [r["outcome"] for r in train],
                                      [r["source"] for r in train])
-        pipelines["median+hier_platt+cap"] = lambda r: cal.cap(hp.apply(agg(r["members"]), r["source"]), lo, hi)
+        pipelines[f"{xname}+hier_platt+cap"] = lambda r: cal.cap(hp.apply(x_of(r), r["source"]), lo, hi)
     res = ev.replay_binary(test, pipelines, baseline="median_initial")
     print(f"\nscored on the newest {len(test)} questions (fit on the older {len(train)}):")
     print(f"{'pipeline':<24}{'log score':>10}{'brier':>8}{'h2h vs baseline [95% CI]':>32}")
@@ -77,16 +90,16 @@ def main() -> None:
         h = r["h2h_vs_baseline"]
         print(f"{name:<24}{r['mean_log_score']:>10.4f}{r['mean_brier']:>8.4f}   {h['mean']:+7.2f} [{h['lo']:+.2f}, {h['hi']:+.2f}]")
 
-    print("\ncalibration of median_initial on all rows:")
-    for b in ev.calibration_table([agg(r["members"]) for r in rows], [r["outcome"] for r in rows]):
+    print(f"\ncalibration of {xname} on all rows:")
+    for b in ev.calibration_table([x_of(r) for r in rows], [r["outcome"] for r in rows]):
         print(f"  {b['bin']}: n={b['n']:<4} forecast={b['mean_forecast']:.2f} observed={b['observed']:.2f}")
 
     if len(rows) >= args.min_n:
-        final, scores = cal.fit_platt_cv([agg(r["members"]) for r in rows], [r["outcome"] for r in rows])
-        identity_loss = cal.log_loss([agg(r["members"]) for r in rows], [r["outcome"] for r in rows])
+        final, scores = cal.fit_platt_cv([x_of(r) for r in rows], [r["outcome"] for r in rows])
+        identity_loss = cal.log_loss([x_of(r) for r in rows], [r["outcome"] for r in rows])
         best_cv = min(scores.values())
         use = best_cv < identity_loss
-        payload = {"a": final.a if use else 1.0, "b": final.b if use else 0.0, "n": final.n,
+        payload = {"a": final.a if use else 1.0, "b": final.b if use else 0.0, "n": final.n, "fit_on": xname,
                    "cv_log_loss": best_cv, "identity_log_loss": identity_loss, "applied": use}
         with open(args.out, "w") as fh:
             json.dump(payload, fh, indent=2)

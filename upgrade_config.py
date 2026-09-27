@@ -69,7 +69,10 @@ UPGRADE = {
     "numeric_drift_damping": 0.5,
     "numeric_min_history_changes": 20,
     "tail_widening_factor": 1.0,
-    "market_blend_weight": 0.3,
+    "market_blend_weight": 0.15,
+    "STRUCTURED_MODE": "shadow",
+    "STRUCTURED_BLEND_WEIGHT": 0.5,
+    "bot_version": "2026-09-27-v3-shadow",
     "market_max_deadline_gap_days": 7,
 
     # Calibration and caps.
