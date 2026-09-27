@@ -29,7 +29,7 @@ jobs:
         run: |
           poetry run python scripts/sync_resolutions.py
           poetry run python scripts/build_replay_records.py --runs "data/runs/**/*.jsonl" --outcomes data/outcomes.jsonl --out data/replay_records.jsonl
-          poetry run python scripts/replay_and_fit.py data/replay_records.jsonl --out data/calibration.json | tee data/replay_report.txt
+          poetry run python scripts/replay_and_fit.py data/replay_records.jsonl --fit-stage after_anchor --out data/calibration.json | tee data/replay_report.txt
       - name: Push calibration
         if: always()
         env:
