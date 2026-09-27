@@ -24,9 +24,17 @@ from forecast_logging import (
     question_fields, safe_append_event, store_research, to_jsonable,
 )
 from forecast_logic import ForecastEngine, date_number
-from forecast_upgrades.aggregation import aggregate_binary, aggregate_mc, normalize_with_floor
+from forecast_upgrades.advanced import (
+    conditional_cap, evidence_update, hierarchical_logit_aggregate, lift_floor,
+)
+from forecast_upgrades.aggregation import aggregate_binary, aggregate_mc, blend_logodds, mix_cdfs
 from forecast_upgrades.calibration import PlattParams, cap, mc_temperature_apply
+import market_anchor
 import research_v2
+import structured_track
+from forecast_upgrades.numeric import (
+    default_step_bounds, make_grid, percentiles_to_cdf, validate_cdf,
+)
 from upgrade_config import UPGRADE, feature_flags
 
 logger = logging.getLogger(__name__)
@@ -44,16 +52,21 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         if not 1 <= len(names) <= 3:
             raise ValueError('Set BOT_MODELS to 1–3 comma-separated LiteLLM model IDs, '
                              'e.g. openrouter/<provider>/<model>. Choose IDs available to your key.')
-        self.call_timeout = float(os.getenv('BOT_CALL_TIMEOUT_SECONDS', '120'))
-        self.question_budget = float(os.getenv('BOT_QUESTION_BUDGET_SECONDS', '600'))
-        self.max_output_tokens = int(os.getenv('BOT_MAX_OUTPUT_TOKENS', '3000'))
+        if UPGRADE.get('FF_ENSEMBLE_V2'):
+            samples = int(UPGRADE.get('samples_per_model', 2))
+            names = [name for name in names for _ in range(samples)]
+        self.call_timeout = float(os.getenv('BOT_CALL_TIMEOUT_SECONDS', '300'))
+        self.question_budget = float(os.getenv('BOT_QUESTION_BUDGET_SECONDS', '1500'))
+        self.max_output_tokens = int(os.getenv('BOT_MAX_OUTPUT_TOKENS', '16000'))
         if not all(math.isfinite(v) and v > 0 for v in (self.call_timeout, self.question_budget)):
             raise ValueError('Timeouts must be positive')
         if self.max_output_tokens < 500:
             raise ValueError('BOT_MAX_OUTPUT_TOKENS must be at least 500')
         self._analysts = [GeneralLlm(
                           model=name, timeout=self.call_timeout, allowed_tries=1,
-                          max_tokens=self.max_output_tokens)
+                          max_tokens=self.max_output_tokens,
+                          reasoning_effort=UPGRADE.get('reasoning_effort', 'high'),
+                          extra_body={'reasoning': {'effort': UPGRADE.get('reasoning_effort', 'high')}})
                           for name in names]
         llms = dict(kwargs.pop('llms', {}) or {})
         for key in ('default', 'parser', 'summarizer'):
@@ -63,7 +76,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             llms['researcher'] = research_model
         super().__init__(llms=llms, **kwargs)
         self._model_names = names
-        self._call_limiter = asyncio.Semaphore(4)
+        self._call_limiter = asyncio.Semaphore(int(os.getenv('BOT_PROVIDER_CONCURRENCY', '8')))
         self._deadlines = {}
         self._logging_enabled = (
             os.getenv('BOT_ENABLE_DURABLE_LOGGING', 'true').lower() == 'true'
@@ -75,7 +88,11 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         self._research_hashes = {}
         self._research_fallback = os.getenv(
             'BOT_RESEARCH_FALLBACK',
-            'openrouter/google/gemini-3.8-flash:online',
+            'openrouter/openai/gpt-6-sol:online',
+        ).strip()
+        self._research_tertiary = os.getenv(
+            'BOT_RESEARCH_TERTIARY',
+            'openrouter/openai/gpt-6-sol:online',
         ).strip()
         self._research_retry_count = int(
             os.getenv('BOT_RESEARCH_RETRY_COUNT', '1')
@@ -114,7 +131,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 model=self._research_fallback,
                 timeout=self.call_timeout,
                 allowed_tries=1,
-                max_tokens=min(2000, self.max_output_tokens),
+                max_tokens=min(4000, self.max_output_tokens),
+                reasoning_effort='low',
             )
             if self._research_fallback
             and self._research_fallback not in ('None', 'no_research')
@@ -194,10 +212,27 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             kind = 'revision'
         else:
             kind = 'initial_forecast'
-        return await self._tracked_call(
+        if kind == 'review' and UPGRADE.get('FF_SEPARATE_REVIEWER'):
+            index = 0
+        response = await self._tracked_call(
             kind=kind,
             model=self._model_names[index],
             call=lambda: self._analysts[index].invoke(prompt),
+        )
+        if response and str(response).strip():
+            return response
+        doubled = GeneralLlm(
+            model=self._model_names[index],
+            timeout=self.call_timeout,
+            allowed_tries=1,
+            max_tokens=self.max_output_tokens * 2,
+            reasoning_effort=UPGRADE.get('reasoning_effort', 'high'),
+        )
+        return await self._tracked_call(
+            kind=kind,
+            model=self._model_names[index],
+            call=lambda: doubled.invoke(prompt),
+            details={'truncated': True, 'retry': 'double_max_tokens'},
         )
 
     @staticmethod
@@ -425,6 +460,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             'question_text', 'background_info', 'resolution_criteria', 'fine_print',
             'unit_of_measure', 'close_time', 'scheduled_resolution_time', 'conditional_type')}
         spec['now_utc'] = datetime.now(timezone.utc).isoformat()
+        if UPGRADE.get('FF_ROLE_ROTATION'):
+            spec['role_offset'] = int(getattr(question, 'id_of_question', 0) or 0) % 3
         spec['conditional_instruction'] = self._get_conditional_disclaimer_if_necessary(question)
         if isinstance(question, BinaryQuestion):
             spec['kind'] = 'binary'
@@ -455,16 +492,20 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         return bool(researcher) and researcher not in ('None', 'no_research')
 
     async def _invoke_cheap(self, kind, prompt):
-        if self._fallback_researcher is not None:
-            return await self._tracked_call(
-                kind=kind,
-                model=self._research_fallback,
-                call=lambda: self._fallback_researcher.invoke(prompt),
+        extractor = getattr(self, '_extractor', None)
+        if extractor is None:
+            extractor = GeneralLlm(
+                model=self._model_names[0],
+                timeout=self.call_timeout,
+                allowed_tries=1,
+                max_tokens=4000,
+                reasoning_effort='low',
             )
+            self._extractor = extractor
         return await self._tracked_call(
             kind=kind,
             model=self._model_names[0],
-            call=lambda: self._analysts[0].invoke(prompt),
+            call=lambda: extractor.invoke(prompt),
         )
 
     async def _search_named_route(self, route, prompt):
@@ -503,9 +544,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             for query in crux['search_queries']:
                 if query_count >= max_queries:
                     break
-                route = primary if query_count % 2 == 0 else (
-                    self._research_fallback or primary
-                )
+                routes = [primary, self._research_fallback or primary]
+                route = routes[query_count % len(routes)]
                 prompt = (
                     'Investigate this factual gap. Give dated sources, distinguish '
                     'confirmed facts from inference, deduplicate syndicated reports. '
@@ -531,12 +571,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 query_count += 1
             crux_findings.append({**crux, 'findings': findings})
         unique_providers = sorted(set(providers_used))
-        if len(unique_providers) < int(UPGRADE['research_min_providers']):
-            raise RuntimeError(
-                'Research v2 used fewer than '
-                + str(UPGRADE['research_min_providers'])
-                + ' providers'
-            )
+        if not unique_providers:
+            raise RuntimeError('Research v2: zero providers succeeded')
         try:
             claims = research_v2.validate_claims(
                 await self._invoke_cheap(
@@ -576,6 +612,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 'lane_count': len(crux_findings),
                 'failed_lanes': [],
                 'providers': unique_providers,
+                'single_provider': len(unique_providers) < int(UPGRADE['research_min_providers']),
                 'crux_count': len(cruxes),
                 'query_count': query_count,
                 'claim_count': len(claims),
@@ -713,19 +750,36 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             if self._is_minibench(question)
             else UPGRADE['binary_cap']
         )
+        if UPGRADE.get('FF_CONDITIONAL_CAP'):
+            return conditional_cap(value, self._is_minibench(question))
         return cap(value, lo, hi)
 
     def _aggregate(self, candidates, question):
         values = [self._convert(c, question) for c in candidates]
         if isinstance(question, BinaryQuestion):
             raw = aggregate_binary(values, UPGRADE['binary_aggregation'])
+            if UPGRADE.get('FF_LOGIT_SHRINK'):
+                grouped = {}
+                names = self._model_names if len(self._model_names) == len(values) else [
+                    f"member-{i}" for i in range(len(values))
+                ]
+                for model, probability in zip(names, values):
+                    grouped.setdefault(model, []).append(probability)
+                raw, _info = hierarchical_logit_aggregate(
+                    grouped,
+                    prior_p=UPGRADE.get('shrink_prior_p', 0.35),
+                    tau=UPGRADE.get('shrink_tau', 2.0),
+                )
+            if UPGRADE.get('FF_STRUCTURED_MODELS'):
+                raw = self._blend_structured(raw, candidates)
             return raw, self._postprocess_binary(raw, question)
         if isinstance(question, MultipleChoiceQuestion):
             vectors = [
                 [converted.to_dict()[name] for name in question.options]
                 for converted in values
             ]
-            raw = aggregate_mc(vectors, 'mean', floor=UPGRADE['mc_floor'])
+            averaged = aggregate_mc(vectors, 'mean', floor=1e-6)
+            raw = lift_floor(averaged, UPGRADE['mc_floor'])
             final = list(raw)
             payload = self._calibration_payload()
             if payload and payload.get('mc_temperature') is not None:
@@ -737,7 +791,10 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 {'option_name': name, 'probability': probability}
                 for name, probability in zip(question.options, final)
             ])
-        # A linear mixture of CDFs preserves within-model and between-model uncertainty.
+        if UPGRADE.get('FF_NUMERIC_V2'):
+            built = self._numeric_v2(candidates, question)
+            if built is not None:
+                return built, built
         cdfs = [v.get_cdf() for v in values]
         axis = [point.value for point in cdfs[0]]
         if any([point.value for point in cdf] != axis for cdf in cdfs):
@@ -747,6 +804,87 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         final = NumericDistribution.from_question(mixed, question)
         return final, final
 
+    def _numeric_v2(self, candidates, question):
+        """Build each member CDF in code, mix them, and fall back if the curve is illegal."""
+        try:
+            is_date = isinstance(question, DateQuestion)
+            lower = question.lower_bound.timestamp() if is_date else question.lower_bound
+            upper = question.upper_bound.timestamp() if is_date else question.upper_bound
+            n_points = int(getattr(question, 'cdf_size', 201) or 201)
+            member_cdfs = []
+            for candidate in candidates:
+                percentiles = {}
+                for point in candidate['quantiles']:
+                    value = date_number(point['value']) if is_date else float(point['value'])
+                    percentiles[float(point['percentile'])] = value
+                member_cdfs.append(percentiles_to_cdf(
+                    percentiles, lower, upper,
+                    question.open_lower_bound, question.open_upper_bound,
+                    question.zero_point, n_points=n_points,
+                ))
+            mixed = mix_cdfs(member_cdfs)
+            errors = validate_cdf(
+                mixed, question.open_lower_bound, question.open_upper_bound,
+                *default_step_bounds(n_points),
+            )
+            if errors:
+                logger.warning('Numeric v2 CDF rejected: %s', errors)
+                return None
+            grid = make_grid(lower, upper, question.zero_point, n_points)
+            declared = [
+                Percentile(percentile=float(mixed[i]), value=float(grid[i]))
+                for i in range(len(mixed))
+            ]
+            distribution = NumericDistribution.from_question(declared, question)
+            distribution.get_cdf()
+            return distribution
+        except Exception:
+            logger.exception('Numeric v2 failed; using the SDK mixture')
+            return None
+
+    def _attach_market(self, question, candidates):
+        if not candidates:
+            return
+        try:
+            match = market_anchor.match_manifold(
+                getattr(question, 'question_text', '') or '',
+                getattr(question, 'close_time', None),
+            )
+        except Exception:
+            logger.exception('Market lookup failed; forecast left unblended')
+            return
+        if match:
+            candidates[0]['market_price'] = match['price']
+            candidates[0]['market_anchor'] = match
+
+    async def _apply_structured_track(self, result, research):
+        direct = result.candidates[0].get('probability') if result.candidates else None
+        if not isinstance(direct, (int, float)):
+            return
+        base, description = structured_track.baseline_probability(None, float(direct))
+        if base is None:
+            return
+        try:
+            raw = await self._invoke_cheap(
+                'factors', structured_track.factor_prompt(base, description, research)
+            )
+            structured_track.attach_factors(result.candidates, structured_track.parse_factors(raw))
+        except Exception:
+            logger.exception('Structured factor update skipped; ensemble forecast kept')
+
+    def _blend_structured(self, direct, candidates):
+        items = []
+        for candidate in candidates:
+            for factor in candidate.get('factors') or []:
+                if isinstance(factor, dict) and factor.get('odds_multiplier'):
+                    items.append(factor)
+        if not items:
+            return direct
+        updated, _trace = evidence_update(direct, items)
+        if UPGRADE.get('FF_MARKET_ANCHOR') and candidates and candidates[0].get('market_price'):
+            updated = blend_logodds(updated, float(candidates[0]['market_price']), UPGRADE['market_blend_weight'])
+        return blend_logodds(direct, updated, UPGRADE.get('structured_weight', 0.5))
+
     def _combine(self, candidates, question):
         return self._aggregate(candidates, question)[1]
 
@@ -755,9 +893,31 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         token = self._call_context.set(context)
         started = time.monotonic()
         try:
-            result = await self._engine.run(
-                self._spec(question), research, self._deadline(question),
-                validate=lambda c: self._convert(c, question))
+            try:
+                result = await self._engine.run(
+                    self._spec(question), research, self._deadline(question),
+                    validate=lambda c: self._convert(c, question))
+            except RuntimeError as exc:
+                if 'All analysts failed' not in str(exc):
+                    raise
+                raw = await self._invoke_analyst(0, (
+                    'One forecast only. Use the research below. Return the JSON schema '
+                    'for this question and nothing else.\n'
+                    + json.dumps(self._spec(question), default=str) + '\n' + research[:12000]
+                ))
+                from forecast_logic import validate_forecast
+                candidate = validate_forecast(raw, self._spec(question))
+                candidate['fallback_forecast'] = True
+                result = type('Fallback', (), {
+                    'candidates': [candidate],
+                    'initial_candidates': [candidate],
+                    'notes': ['fallback_forecast=true'],
+                    'review': '',
+                })()
+            if UPGRADE.get('FF_STRUCTURED_MODELS') and isinstance(question, BinaryQuestion):
+                await self._apply_structured_track(result, research)
+            if UPGRADE.get('FF_MARKET_ANCHOR') and isinstance(question, BinaryQuestion):
+                self._attach_market(question, result.candidates)
             aggregate_raw, value = self._aggregate(result.candidates, question)
             explanation = ('## Adaptive forecast\n'
                            'Median binary aggregation with last-step caps; multiple-choice mean with a floor. '
@@ -790,6 +950,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     ),
                     'aggregate_raw': to_jsonable(aggregate_raw),
                     'final_submitted': to_jsonable(value),
+                    'explanation': explanation[:8000],
                     'prediction': to_jsonable(value),
                     'calls': telemetry,
                     'tracked_call_cost_usd': sum(

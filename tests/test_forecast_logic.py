@@ -43,10 +43,10 @@ class ValidationTests(unittest.TestCase):
         value = candidate()
         value['quantiles'] = [{'percentile': q, 'value': q*100} for q in QUANTILES]
         validate_forecast(json.dumps(value), spec)
-        value['quantiles'][2]['value'] = 99
+        value['quantiles'][4]['value'] = 99
         with self.assertRaises(ValueError):
             validate_forecast(json.dumps(value), spec)
-        value['quantiles'][2]['value'] = 40
+        value['quantiles'][4]['value'] = 40
         value['quantiles'][-1]['value'] = 101
         with self.assertRaises(ValueError):
             validate_forecast(json.dumps(value), spec)
