@@ -79,6 +79,31 @@ def test_written_deadline_becomes_iso():
     assert spec["time_remaining_days"] == pytest.approx(95.0)
 
 
+def test_unreadable_spec_fields_do_not_reject_research():
+    now = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    scheduled = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    for label in ("event_by_deadline", "binary"):
+        spec = validate_resolution_spec(
+            _spec_raw(archetype=label),
+            scheduled_resolution_time=scheduled,
+            now=now,
+        )
+        assert spec["archetype"] == "other"
+        assert spec["archetype_unrecognised"] is True
+        assert spec["event_deadline"].startswith("2026-12-01")
+    for written in ("2026-12-31 23:59 UTC", "31 Dec 2026", "end of 2026"):
+        spec = validate_resolution_spec(
+            _spec_raw(deadline_utc=written),
+            scheduled_resolution_time=scheduled,
+            now=now,
+        )
+        assert spec["deadline_unparsed"] is True
+        assert spec["deadline_utc"] is None
+        assert spec["archetype"] == "deadline_event"
+        assert spec["event_deadline"].startswith("2026-10-01")
+        assert spec["time_remaining_days"] == pytest.approx(7.0)
+
+
 def test_spec_prompt_requires_iso_deadline_and_exact_labels():
     text = spec_prompt({"question_text": "Will it happen?"})
     assert "deadline_event" in text
