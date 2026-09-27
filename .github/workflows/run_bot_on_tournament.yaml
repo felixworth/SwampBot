@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 
-# Run the adaptive bot on the configured seasonal tournament and MiniBench.
+# Run the adaptive bot on the configured seasonal tournament only.
 jobs:
   forecast_job:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
@@ -52,7 +52,7 @@ jobs:
           python -c "import os,sys; m=os.environ.get('BOT_MODELS','').strip(); sys.exit('BOT_MODELS is missing or still uses gpt-4o') if (not m or 'gpt-4o' in m) else None"
       - name: Run bot
         run: |
-          poetry run python run_adaptive.py --mode tournament --include-minibench --publish
+          poetry run python run_adaptive.py --mode tournament --publish
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
