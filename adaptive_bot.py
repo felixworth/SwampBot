@@ -744,7 +744,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             return None
         return data if isinstance(data, dict) else None
 
-    def _postprocess_binary(self, probability, question):
+    def _calibrate_binary(self, probability):
         value = float(probability)
         payload = self._calibration_payload()
         if payload and payload.get('applied'):
@@ -752,6 +752,9 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 a=float(payload.get('a', 1.0)),
                 b=float(payload.get('b', 0.0)),
             ).apply(value))
+        return value
+
+    def _cap_binary(self, value, question):
         lo, hi = (
             UPGRADE['binary_cap_auto_resolved']
             if self._is_minibench(question)
@@ -761,17 +764,23 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             return conditional_cap(value, self._is_minibench(question))
         return cap(value, lo, hi)
 
-    def _aggregate(self, candidates, question):
+    def _postprocess_binary(self, probability, question):
+        return self._cap_binary(self._calibrate_binary(probability), question)
+
+    def _aggregate(self, candidates, question, initial=None):
         values = [self._convert(c, question) for c in candidates]
         if isinstance(question, BinaryQuestion):
-            median = aggregate_binary(values, 'median')
-            shrunk = median
+            revised = [float(c['probability']) for c in candidates]
+            first = [float(c['probability']) for c in (initial or candidates)]
+            median = aggregate_binary(first, 'median')
+            after_review = aggregate_binary(revised, 'median')
+            shrunk = after_review
             if UPGRADE.get('FF_LOGIT_SHRINK'):
                 grouped = {}
-                names = self._model_names if len(self._model_names) == len(values) else [
-                    f"member-{i}" for i in range(len(values))
+                names = self._model_names if len(self._model_names) == len(revised) else [
+                    f"member-{i}" for i in range(len(revised))
                 ]
-                for model, probability in zip(names, values):
+                for model, probability in zip(names, revised):
                     grouped.setdefault(model, []).append(probability)
                 shrunk, _info = hierarchical_logit_aggregate(
                     grouped,
@@ -779,18 +788,17 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     tau=UPGRADE.get('shrink_tau', 2.0),
                 )
             anchored = self._blend_structured(shrunk, candidates) if UPGRADE.get('FF_MARKET_ANCHOR') or UPGRADE.get('STRUCTURED_MODE') == 'blend' else shrunk
-            final = self._postprocess_binary(anchored, question)
-            self._last_stages = {
+            calibrated = self._calibrate_binary(anchored)
+            final = self._cap_binary(calibrated, question)
+            stages = {
                 'median': median,
-                'after_review': median,
+                'after_review': after_review,
                 'after_shrinkage': shrunk,
                 'after_anchor': anchored,
-                'after_calibration': anchored,
+                'after_calibration': calibrated,
                 'final': final,
             }
-            if UPGRADE.get('STRUCTURED_MODE') == 'shadow':
-                assert final == self._postprocess_binary(anchored, question)
-            return shrunk, final
+            return shrunk, final, stages
         if isinstance(question, MultipleChoiceQuestion):
             vectors = [
                 [converted.to_dict()[name] for name in question.options]
@@ -808,11 +816,11 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             return raw, PredictedOptionList(predicted_options=[
                 {'option_name': name, 'probability': probability}
                 for name, probability in zip(question.options, final)
-            ])
+            ]), None
         if UPGRADE.get('FF_NUMERIC_V2'):
             built = self._numeric_v2(candidates, question)
             if built is not None:
-                return built, built
+                return built, built, None
         cdfs = [v.get_cdf() for v in values]
         axis = [point.value for point in cdfs[0]]
         if any([point.value for point in cdf] != axis for cdf in cdfs):
@@ -820,7 +828,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         mixed = [Percentile(value=x, percentile=fmean(cdf[i].percentile for cdf in cdfs))
                  for i, x in enumerate(axis)]
         final = NumericDistribution.from_question(mixed, question)
-        return final, final
+        return final, final, None
 
     def _numeric_v2(self, candidates, question):
         """Build each member CDF in code, mix them, and fall back if the curve is illegal."""
@@ -1049,13 +1057,12 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 await self._apply_structured_track(result, question, research)
             if UPGRADE.get('FF_MARKET_ANCHOR') and isinstance(question, BinaryQuestion):
                 await self._attach_market(question, result.candidates)
-            self._last_structured = await self._shadow_structured(question, research)
-            aggregate_raw, value = self._aggregate(result.candidates, question)
-            if UPGRADE.get('STRUCTURED_MODE') == 'shadow':
-                again = self._postprocess_binary(
-                    self._last_stages.get('after_anchor', aggregate_raw), question
-                ) if isinstance(question, BinaryQuestion) else value
-                assert again == value or not isinstance(question, BinaryQuestion)
+            structured = await self._shadow_structured(question, research)
+            aggregate_raw, value, stages = self._aggregate(
+                result.candidates, question, initial=result.initial_candidates
+            )
+            if UPGRADE.get('STRUCTURED_MODE') == 'shadow' and stages is not None:
+                assert self._postprocess_binary(stages['after_anchor'], question) == value
             explanation = ('## Adaptive forecast\n'
                            'Median binary aggregation with last-step caps; multiple-choice mean with a floor. '
                            'Numeric/date distributions mixed on the SDK CDF grid.\n'
@@ -1088,9 +1095,9 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     'aggregate_raw': to_jsonable(aggregate_raw),
                     'final_submitted': to_jsonable(value),
                     'explanation': explanation[:8000],
-                    'stages': getattr(self, '_last_stages', None),
+                    **({'stages': stages} if stages is not None else {}),
                     'bot_version': UPGRADE.get('bot_version'),
-                    'structured': getattr(self, '_last_structured', {'valid': False, 'error': 'not_applicable'}),
+                    'structured': structured,
                     'market_anchor': (result.candidates[0].get('market_anchor') if result.candidates else None),
                     'prediction': to_jsonable(value),
                     'calls': telemetry,
