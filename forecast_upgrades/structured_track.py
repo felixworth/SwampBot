@@ -60,7 +60,11 @@ def compute_baseline(
     raise ValueError(f"archetype {archetype!r} is not supported")
 
 
-def clean_factors(raw: Sequence[Mapping[str, Any]] | None, max_factors: int = 6) -> list[dict]:
+def clean_factors(
+    raw: Sequence[Mapping[str, Any]] | None,
+    max_factors: int = 6,
+    ledger_groups: set[str] | None = None,
+) -> list[dict]:
     out: list[dict] = []
     for i, factor in enumerate(raw or []):
         if not isinstance(factor, Mapping):
@@ -70,6 +74,8 @@ def clean_factors(raw: Sequence[Mapping[str, Any]] | None, max_factors: int = 6)
         except ValueError:
             continue
         group = factor.get("independence_group")
+        if ledger_groups is not None and str(group) not in ledger_groups:
+            group = None
         out.append({
             "odds_multiplier": min(max(multiplier, FACTOR_BOUNDS[0]), FACTOR_BOUNDS[1]),
             "group": str(group) if group not in (None, "") else f"ungrouped_{i}",
@@ -96,6 +102,7 @@ def run_structured_track(
     baseline_json: Mapping[str, Any] | None,
     factors_json: Mapping[str, Any] | None,
     time_remaining_days: float,
+    ledger_groups: set[str] | None = None,
     **baseline_kwargs: Any,
 ) -> dict:
     record: dict[str, Any] = {"archetype": archetype, "valid": False, "error": None}
@@ -106,7 +113,9 @@ def run_structured_track(
         base_p, detail = compute_baseline(
             archetype, baseline_json or {}, time_remaining_days, **baseline_kwargs
         )
-        factors = clean_factors((factors_json or {}).get("factors"))
+        factors = clean_factors(
+            (factors_json or {}).get("factors"), ledger_groups=ledger_groups
+        )
         record.update({
             "base_p": base_p, "baseline_detail": detail,
             **structured_forecast(base_p, factors), "factors": factors, "valid": True,

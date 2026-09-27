@@ -129,6 +129,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         self._research_consecutive_failures = 0
         self._research_breaker_open_until = 0.0
         self._resolution_specs = {}
+        self._claim_ledgers = {}
+        self._archetype_counts = {}
         self._failure_path = Path(os.getenv('BOT_FAILURE_PATH', 'data/failures.json'))
         self._fallback_researcher = (
             GeneralLlm(
@@ -601,6 +603,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             )
         ]
         unanswered.extend(spec.get('ambiguities') or [])
+        self._claim_ledgers[id(question)] = claims
         brief = research_v2.format_research_brief(
             spec, facts, outside, crux_findings, claims, unanswered
         )
@@ -624,6 +627,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 'query_count': query_count,
                 'claim_count': len(claims),
                 'resolution_spec': spec,
+                'archetype': spec.get('archetype'),
+                'archetype_counts': dict(self._note_archetype(spec.get('archetype'))),
                 'calls': telemetry,
                 'tracked_call_cost_usd': sum(
                     call.get('cost_usd', 0) or 0 for call in telemetry
@@ -991,6 +996,11 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     raise report
         return reports
 
+    def _note_archetype(self, archetype):
+        name = archetype or "missing"
+        self._archetype_counts[name] = self._archetype_counts.get(name, 0) + 1
+        return self._archetype_counts
+
     async def _shadow_structured(self, question, research):
         """Log a structured forecast without changing the submitted number."""
         spec = self._resolution_specs.get(id(question)) or {}
@@ -1009,16 +1019,28 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 'count_source, rate_multiplier, multiplier_reason, scenarios.\n'
                 + json.dumps({'spec': spec, 'evidence': research[:12000]}, default=str)
             ))
+            claims = self._claim_ledgers.get(id(question)) or []
+            ledger = [
+                {
+                    "id": claim.get("id") or claim.get("independence_group"),
+                    "text": claim.get("claim"),
+                    "group": claim.get("independence_group"),
+                }
+                for claim in claims
+            ]
             factor_raw = await self._invoke_cheap('structured_factors', (
                 'List up to 6 situational factors NOT already captured by the baseline. '
-                'Each odds multiplier is between 0.25 and 4. Reuse independence group ids. '
-                'If nothing falls outside the baseline, return an empty list. Return only JSON: '
-                '{"factors":[{"description":"","odds_multiplier":1.0,"claim_ids":[],'
-                '"independence_group":"g1","why_not_in_baseline":""}]}\n'
-                + baseline_raw[:4000]
+                'Each odds multiplier is between 0.25 and 4. Reuse independence group ids '
+                'from the claims ledger. If nothing falls outside the baseline, return an empty list. '
+                'Return only JSON: {"factors":[{"description":"","odds_multiplier":1.0,'
+                '"claim_ids":[],"independence_group":"g1","why_not_in_baseline":""}]}\n'
+                'CLAIMS LEDGER:\n' + json.dumps(ledger, default=str)
+                + '\nBASELINE:\n' + baseline_raw[:4000]
             ))
+            groups = {str(item.get("group")) for item in ledger if item.get("group")}
             return run_structured_track(
-                archetype, parse_json(baseline_raw), parse_json(factor_raw), float(days)
+                archetype, parse_json(baseline_raw), parse_json(factor_raw), float(days),
+                ledger_groups=groups,
             )
         except Exception as exc:
             logger.exception('Shadow structured track failed')

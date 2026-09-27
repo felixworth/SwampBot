@@ -14,6 +14,16 @@ import requests
 from forecast_logic import parse_json
 from upgrade_config import UPGRADE
 
+ARCHETYPE_DEFINITIONS = {
+    "deadline_event": "YES if a stated event happens before a deadline.",
+    "threshold_quantity": "YES if a measured number crosses a threshold.",
+    "scheduled_decision": "YES depends on a decision that already has a date.",
+    "numeric_quantity": "The resolution is a number, not yes or no.",
+    "multiple_choice": "The resolution is one of a fixed list of options.",
+    "other": "None of the types above.",
+}
+
+
 SPEC_INSTRUCTION = (
     "Extract the resolution specification from the question. Quote the "
     "resolution criteria where precision matters. List anything ambiguous "
@@ -75,6 +85,10 @@ def validate_resolution_spec(
         raise ValueError("Resolution spec missing: " + ", ".join(missing))
     if not isinstance(data.get("resolution_sources"), list):
         raise ValueError("resolution_sources must be a list")
+    if data.get("archetype") not in ARCHETYPE_DEFINITIONS:
+        raise ValueError(
+            "archetype must be one of " + ", ".join(ARCHETYPE_DEFINITIONS)
+        )
     horizon = event_deadline(data, scheduled_resolution_time)
     data["event_deadline"] = _as_iso(horizon)
     data["forecasts_close"] = _as_iso(forecasts_close)
@@ -290,6 +304,8 @@ def spec_prompt(question_spec: dict[str, Any]) -> str:
         SPEC_INSTRUCTION
         + "\nQUESTION DATA:\n"
         + json.dumps(question_spec, default=str)
+        + "\nArchetype, pick one:\n"
+        + "\n".join(f"- {name}: {text}" for name, text in ARCHETYPE_DEFINITIONS.items())
         + '\nSchema: {"question_type":"","archetype":"","target":"",'
         '"resolves_yes_if":"","deadline_utc":"","resolution_sources":'
         '[{"name":"","url":"","kind":""}],"units":"","thresholds":[],'
