@@ -13,6 +13,7 @@ from research_v2 import (
     join_outcomes,
     similar_questions,
     time_remaining_days,
+    spec_prompt,
     validate_cruxes,
     validate_resolution_spec,
 )
@@ -44,6 +45,45 @@ def test_validate_resolution_spec_uses_event_deadline_not_close():
     assert spec["event_deadline"].startswith("2026-12-01")
     assert spec["forecasts_close"].startswith("2026-09-30")
     assert spec["target"] == "Event X happens"
+
+
+def _spec_raw(**overrides):
+    payload = {
+        "question_type": "binary",
+        "archetype": "deadline_event",
+        "target": "Event X happens",
+        "deadline_utc": "2026-12-01T00:00:00+00:00",
+        "resolution_sources": [{"name": "Gov", "url": "https://example.org", "kind": "webpage"}],
+        "ambiguities": [],
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+def test_archetype_label_is_normalized():
+    spec = validate_resolution_spec(
+        _spec_raw(archetype="Deadline event"),
+        now=datetime(2026, 9, 24, tzinfo=timezone.utc),
+    )
+    assert spec["archetype"] == "deadline_event"
+
+
+def test_written_deadline_becomes_iso():
+    now = datetime(2026, 9, 27, tzinfo=timezone.utc)
+    spec = validate_resolution_spec(
+        _spec_raw(deadline_utc="December 31, 2026"),
+        now=now,
+    )
+    assert spec["deadline_utc"].startswith("2026-12-31")
+    assert spec["event_deadline"].startswith("2026-12-31")
+    assert spec["time_remaining_days"] == pytest.approx(95.0)
+
+
+def test_spec_prompt_requires_iso_deadline_and_exact_labels():
+    text = spec_prompt({"question_text": "Will it happen?"})
+    assert "deadline_event" in text
+    assert "ISO-8601" in text
+    assert "Do not write a month name" in text
 
 
 def test_validate_cruxes_enforces_count():

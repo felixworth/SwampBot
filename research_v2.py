@@ -41,14 +41,58 @@ CLAIMS_INSTRUCTION = (
 )
 
 
+_WRITTEN_DATE_FORMATS = (
+    "%B %d, %Y",
+    "%b %d, %Y",
+    "%B %d %Y",
+    "%d %B %Y",
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+)
+
+
+def canonical_archetype(value: Any) -> str | None:
+    """Map 'Deadline event' and similar labels onto the six spec keys."""
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[\s\-]+", "_", text)
+    text = re.sub(r"[^a-z0-9_]", "", text)
+    if text in ARCHETYPE_DEFINITIONS:
+        return text
+    return None
+
+
+def parse_deadline(value: Any) -> datetime | None:
+    """Accept an ISO date or a written date such as 'December 31, 2026'."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+            for fmt in _WRITTEN_DATE_FORMATS:
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    continue
+            if parsed is None:
+                raise ValueError(f"deadline_utc is not a date: {text}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def time_remaining_days(deadline, now=None) -> float | None:
-    if deadline is None or deadline == "":
+    deadline = parse_deadline(deadline)
+    if deadline is None:
         return None
     current = now or datetime.now(timezone.utc)
-    if isinstance(deadline, str):
-        deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-    if deadline.tzinfo is None:
-        deadline = deadline.replace(tzinfo=timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return (deadline - current).total_seconds() / 86400
@@ -85,10 +129,16 @@ def validate_resolution_spec(
         raise ValueError("Resolution spec missing: " + ", ".join(missing))
     if not isinstance(data.get("resolution_sources"), list):
         raise ValueError("resolution_sources must be a list")
-    if data.get("archetype") not in ARCHETYPE_DEFINITIONS:
+    archetype = canonical_archetype(data.get("archetype"))
+    if archetype is None:
         raise ValueError(
             "archetype must be one of " + ", ".join(ARCHETYPE_DEFINITIONS)
         )
+    data["archetype"] = archetype
+    if data.get("deadline_utc"):
+        parsed_deadline = parse_deadline(data.get("deadline_utc"))
+        if parsed_deadline is not None:
+            data["deadline_utc"] = parsed_deadline.isoformat()
     horizon = event_deadline(data, scheduled_resolution_time)
     data["event_deadline"] = _as_iso(horizon)
     data["forecasts_close"] = _as_iso(forecasts_close)
@@ -341,9 +391,11 @@ def spec_prompt(question_spec: dict[str, Any]) -> str:
         SPEC_INSTRUCTION
         + "\nQUESTION DATA:\n"
         + json.dumps(question_spec, default=str)
-        + "\nArchetype, pick one:\n"
+        + "\nArchetype, pick one of these labels exactly:\n"
         + "\n".join(f"- {name}: {text}" for name, text in ARCHETYPE_DEFINITIONS.items())
-        + '\nSchema: {"question_type":"","archetype":"","target":"",'
+        + "\ndeadline_utc must be an ISO-8601 date or datetime in UTC, "
+        "such as 2026-12-31T00:00:00+00:00. Do not write a month name.\n"
+        + 'Schema: {"question_type":"","archetype":"","target":"",'
         '"resolves_yes_if":"","deadline_utc":"","resolution_sources":'
         '[{"name":"","url":"","kind":""}],"units":"","thresholds":[],'
         '"bounds":{},"already_happened":"","remaining_conditions":[],'
