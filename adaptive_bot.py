@@ -41,11 +41,23 @@ from upgrade_config import UPGRADE, feature_flags
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER_ACCOUNT_WORDS = ("credit", "limit", "insufficient", "unauthorized")
+_ACCOUNT_ERROR_PHRASES = (
+    "insufficient credit",
+    "credits",
+    "spending limit",
+    "key limit",
+    "weekly limit",
+    "monthly limit",
+    "unauthorized",
+    "invalid api key",
+)
 
 
 def is_provider_account_error(exc: BaseException) -> bool:
-    """True for credit, spending-limit, and authentication failures."""
+    """True for credit, spending-limit, and authentication failures.
+
+    A rate limit, token limit, or context-length error is a normal question failure.
+    """
     seen: set[int] = set()
     stack: list[BaseException | None] = [exc]
     while stack:
@@ -62,7 +74,7 @@ def is_provider_account_error(exc: BaseException) -> bool:
         text = str(current).lower()
         if re.search(r"\b(401|402|403)\b", text):
             return True
-        if any(word in text for word in _PROVIDER_ACCOUNT_WORDS):
+        if any(phrase in text for phrase in _ACCOUNT_ERROR_PHRASES):
             return True
         if isinstance(current, BaseExceptionGroup):
             stack.extend(current.exceptions)
@@ -71,9 +83,16 @@ def is_provider_account_error(exc: BaseException) -> bool:
     return False
 
 
-def assign_research_route(web_used: int, primary, fallback):
-    """Send the first research_web_queries to the web model; the rest to AskNews."""
-    limit = int(UPGRADE.get('research_web_queries', 1))
+def web_queries_for_archetype(archetype) -> int:
+    table = UPGRADE.get("research_web_queries_by_archetype") or {}
+    if archetype in table:
+        return int(table[archetype])
+    return int(UPGRADE.get("research_web_queries", 1))
+
+
+def assign_research_route(web_used: int, primary, fallback, web_limit: int | None = None):
+    """Send the first web_limit crux queries to the web model; the rest to AskNews."""
+    limit = int(UPGRADE.get("research_web_queries", 1) if web_limit is None else web_limit)
     if web_used < limit:
         return (fallback or primary), web_used + 1
     return primary, web_used
@@ -604,6 +623,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         query_count = 0
         web_used = 0
         route_counts = {}
+        web_limit = web_queries_for_archetype(spec.get("archetype"))
         max_queries = int(UPGRADE['research_max_queries'])
         for crux in cruxes:
             findings = []
@@ -611,7 +631,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 if query_count >= max_queries:
                     break
                 route, web_used = assign_research_route(
-                    web_used, primary, self._research_fallback
+                    web_used, primary, self._research_fallback, web_limit
                 )
                 prompt = (
                     'Investigate this factual gap. Give dated sources, distinguish '

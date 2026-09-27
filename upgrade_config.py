@@ -33,6 +33,14 @@ UPGRADE = {
     "research_max_queries": 5,
     "research_queries_per_crux": 1,
     "research_web_queries": 1,
+    "research_web_queries_by_archetype": {
+        "deadline_event": 1,
+        "scheduled_decision": 1,
+        "threshold_quantity": 2,
+        "numeric_quantity": 3,
+        "multiple_choice": 1,
+        "other": 2,
+    },
     "research_min_providers": 2,
     "cruxes_min": 3,
     "cruxes_max": 5,
@@ -74,7 +82,7 @@ UPGRADE = {
     "market_blend_weight": 0.15,
     "STRUCTURED_MODE": "shadow",
     "STRUCTURED_BLEND_WEIGHT": 0.5,
-    "bot_version": "2026-09-28-v4-ensemble",
+    "bot_version": "2026-09-28-v5-routing",
     "market_max_deadline_gap_days": 7,
 
     # Calibration and caps.

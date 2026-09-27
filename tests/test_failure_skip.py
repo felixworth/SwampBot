@@ -5,6 +5,19 @@ from adaptive_bot import AdaptiveForecastBot, is_provider_account_error
 from forecasting_tools import BinaryQuestion
 
 
+def test_rate_limit_is_not_a_provider_account_error():
+    assert is_provider_account_error(RuntimeError("429 rate limit")) is False
+    assert is_provider_account_error(RuntimeError("token limit exceeded")) is False
+    assert is_provider_account_error(RuntimeError("maximum context length")) is False
+    assert is_provider_account_error(RuntimeError("max_tokens is too large")) is False
+    account = RuntimeError("invalid api key")
+    account.status_code = 401
+    assert is_provider_account_error(account) is True
+    assert is_provider_account_error(RuntimeError("weekly limit reached")) is True
+    assert is_provider_account_error(RuntimeError("insufficient credit for this request")) is True
+    assert is_provider_account_error(RuntimeError("unauthorized")) is True
+
+
 def test_repeated_failures_are_skipped(tmp_path):
     env = {
         "BOT_MODELS": "openrouter/openai/gpt-4o",
@@ -12,21 +25,22 @@ def test_repeated_failures_are_skipped(tmp_path):
         "BOT_ENABLE_REVIEW": "false",
         "BOT_ENABLE_DURABLE_LOGGING": "false",
         "BOT_FAILURE_PATH": str(tmp_path / "failures.json"),
+        "BOT_RETRY_FAILED": "",
     }
     with patch.dict(os.environ, env):
         bot = AdaptiveForecastBot(publish_reports_to_metaculus=False)
-    bot._record_failure(9)
-    bot._record_failure(9)
-    question = BinaryQuestion(question_text="Stuck?", id_of_question=9)
-    bot.forecast_question = AsyncMock()
+        bot._record_failure(9)
+        bot._record_failure(9)
+        question = BinaryQuestion(question_text="Stuck?", id_of_question=9)
+        bot.forecast_question = AsyncMock()
 
-    async def exercise():
-        reports = await bot.forecast_questions([question])
-        assert reports == []
-        bot.forecast_question.assert_not_called()
+        async def exercise():
+            reports = await bot.forecast_questions([question])
+            assert reports == []
+            bot.forecast_question.assert_not_called()
 
-    import asyncio
-    asyncio.run(exercise())
+        import asyncio
+        asyncio.run(exercise())
 
 
 def test_credit_error_is_not_recorded_and_stops_later_questions(tmp_path, caplog):

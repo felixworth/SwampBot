@@ -2,6 +2,11 @@
 
 ## 2026-09-28
 
+Bot version `2026-09-28-v5-routing`.
+
+- The number of web-search queries follows the resolution archetype. A numeric question gets three; a deadline question gets one. The cap stays at five queries.
+- A rate limit, token limit, or context-length error is a normal question failure. Only credit, spending-limit, and authentication errors stop the run.
+
 Bot version `2026-09-28-v4-ensemble`.
 
 - Each configured model now forecasts twice. Samples stay grouped by model if one of them fails.
