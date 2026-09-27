@@ -41,6 +41,43 @@ from upgrade_config import UPGRADE, feature_flags
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_ACCOUNT_WORDS = ("credit", "limit", "insufficient", "unauthorized")
+
+
+def is_provider_account_error(exc: BaseException) -> bool:
+    """True for credit, spending-limit, and authentication failures."""
+    seen: set[int] = set()
+    stack: list[BaseException | None] = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        status = getattr(current, "status_code", None)
+        if status in (401, 402, 403):
+            return True
+        response = getattr(current, "response", None)
+        if getattr(response, "status_code", None) in (401, 402, 403):
+            return True
+        text = str(current).lower()
+        if re.search(r"\b(401|402|403)\b", text):
+            return True
+        if any(word in text for word in _PROVIDER_ACCOUNT_WORDS):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(current.exceptions)
+        stack.append(current.__cause__)
+        stack.append(current.__context__)
+    return False
+
+
+def assign_research_route(web_used: int, primary, fallback):
+    """Send the first research_web_queries to the web model; the rest to AskNews."""
+    limit = int(UPGRADE.get('research_web_queries', 1))
+    if web_used < limit:
+        return (fallback or primary), web_used + 1
+    return primary, web_used
+
 
 class AdaptiveForecastBot(SummerTemplateBot2026):
     def __init__(self, **kwargs):
@@ -78,7 +115,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             llms['researcher'] = research_model
         super().__init__(llms=llms, **kwargs)
         self._model_names = names
-        self._call_limiter = asyncio.Semaphore(int(os.getenv('BOT_PROVIDER_CONCURRENCY', '8')))
+        self._call_limiter = asyncio.Semaphore(int(os.getenv('BOT_PROVIDER_CONCURRENCY', '10')))
         self._deadlines = {}
         self._logging_enabled = (
             os.getenv('BOT_ENABLE_DURABLE_LOGGING', 'true').lower() == 'true'
@@ -132,6 +169,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         self._claim_ledgers = {}
         self._archetype_counts = {}
         self._failure_path = Path(os.getenv('BOT_FAILURE_PATH', 'data/failures.json'))
+        self._provider_halt = False
+        self._run_started = time.monotonic()
         self._fallback_researcher = (
             GeneralLlm(
                 model=self._research_fallback,
@@ -152,7 +191,19 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             review_enabled=os.getenv('BOT_ENABLE_REVIEW', 'true').lower() == 'true',
             disagreement=float(os.getenv('BOT_DISAGREEMENT', '.20')),
             call_timeout=self.call_timeout,
+            labels=list(names),
         )
+        self._run_stats = {
+            'attempted': 0,
+            'succeeded': 0,
+            'failed': 0,
+            'skipped_already': 0,
+            'skipped_failures': 0,
+            'not_started_stop': 0,
+            'not_started_budget': 0,
+            'review_triggers': 0,
+            'forecast_cost_usd': 0.0,
+        }
 
     def get_config(self):
         config = super().get_config()
@@ -551,14 +602,17 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         providers_used = []
         crux_findings = []
         query_count = 0
+        web_used = 0
+        route_counts = {}
         max_queries = int(UPGRADE['research_max_queries'])
         for crux in cruxes:
             findings = []
             for query in crux['search_queries']:
                 if query_count >= max_queries:
                     break
-                routes = [primary, self._research_fallback or primary]
-                route = routes[query_count % len(routes)]
+                route, web_used = assign_research_route(
+                    web_used, primary, self._research_fallback
+                )
                 prompt = (
                     'Investigate this factual gap. Give dated sources, distinguish '
                     'confirmed facts from inference, deduplicate syndicated reports. '
@@ -582,6 +636,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                         'provider': self._research_route_label(route),
                         'text': 'SEARCH_FAILED: ' + self._sanitized_error(exc),
                     })
+                label = self._research_route_label(route)
+                route_counts[label] = route_counts.get(label, 0) + 1
                 query_count += 1
             crux_findings.append({**crux, 'findings': findings})
         unique_providers = sorted(set(providers_used))
@@ -630,6 +686,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 'single_provider': len(unique_providers) < int(UPGRADE['research_min_providers']),
                 'crux_count': len(cruxes),
                 'query_count': query_count,
+                'route_counts': route_counts,
                 'claim_count': len(claims),
                 'resolution_spec': spec,
                 'archetype': spec.get('archetype'),
@@ -787,11 +844,17 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             shrunk = after_review
             if UPGRADE.get('FF_LOGIT_SHRINK'):
                 grouped = {}
-                names = self._model_names if len(self._model_names) == len(revised) else [
-                    f"member-{i}" for i in range(len(revised))
-                ]
-                for model, probability in zip(names, revised):
-                    grouped.setdefault(model, []).append(probability)
+                if candidates and all(candidate.get('model') for candidate in candidates):
+                    for candidate in candidates:
+                        grouped.setdefault(str(candidate['model']), []).append(
+                            float(candidate['probability'])
+                        )
+                else:
+                    names = self._model_names if len(self._model_names) == len(revised) else [
+                        f"member-{i}" for i in range(len(revised))
+                    ]
+                    for model, probability in zip(names, revised):
+                        grouped.setdefault(model, []).append(probability)
                 shrunk, _info = hierarchical_logit_aggregate(
                     grouped,
                     prior_p=UPGRADE.get('shrink_prior_p', 0.35),
@@ -963,11 +1026,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             return 0
         return self._failure_counts().get(str(question_id), 0)
 
-    def _record_failure(self, question_id):
-        if question_id is None:
-            return
-        counts = self._failure_counts()
-        counts[str(question_id)] = counts.get(str(question_id), 0) + 1
+    def _write_failure_counts(self, counts):
         try:
             self._failure_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self._failure_path.with_suffix('.tmp')
@@ -976,25 +1035,122 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         except Exception:
             logger.exception('Could not record question failure')
 
+    def _record_failure(self, question_id):
+        if question_id is None:
+            return
+        counts = self._failure_counts()
+        counts[str(question_id)] = counts.get(str(question_id), 0) + 1
+        self._write_failure_counts(counts)
+
+    def _clear_failure(self, question_id):
+        if question_id is None:
+            return
+        counts = self._failure_counts()
+        if str(question_id) not in counts:
+            return
+        del counts[str(question_id)]
+        self._write_failure_counts(counts)
+
+    def _past_run_budget(self):
+        minutes = float(os.getenv('BOT_RUN_BUDGET_MINUTES', '38'))
+        return (time.monotonic() - self._run_started) >= minutes * 60
+
+    def _retry_requested(self, question_id):
+        raw = os.getenv('BOT_RETRY_FAILED', '').strip()
+        if not raw or question_id is None:
+            return False
+        if raw.lower() == 'all':
+            return True
+        chosen = {part.strip() for part in raw.split(',') if part.strip()}
+        return str(question_id) in chosen
+
     async def forecast_questions(self, questions, return_exceptions=False):
         if self.skip_previously_forecasted_questions:
-            questions = [
-                question for question in questions
-                if not getattr(question, 'already_forecasted', False)
-            ]
+            kept = []
+            for question in questions:
+                if getattr(question, 'already_forecasted', False):
+                    self._run_stats['skipped_already'] += 1
+                else:
+                    kept.append(question)
+            questions = kept
         runnable = []
         for question in questions:
             question_id = getattr(question, 'id_of_question', None)
-            if self._failure_count(question_id) >= 2:
+            if (
+                self._failure_count(question_id) >= 2
+                and not self._retry_requested(question_id)
+            ):
                 logger.warning(
                     'Skipping question %s after repeated failures', question_id
                 )
+                self._run_stats['skipped_failures'] += 1
                 continue
             runnable.append(question)
-        reports = await super().forecast_questions(runnable, return_exceptions=True)
-        for question, report in zip(runnable, reports):
-            if isinstance(report, BaseException):
-                self._record_failure(getattr(question, 'id_of_question', None))
+        if self._provider_halt:
+            for question in runnable:
+                self._run_stats['not_started_stop'] += 1
+                logger.error(
+                    'Not starting question %s after a provider credit or auth error',
+                    getattr(question, 'id_of_question', None),
+                )
+            return []
+        if self._past_run_budget():
+            for question in runnable:
+                self._run_stats['not_started_budget'] += 1
+                logger.error(
+                    'Not starting question %s after the run time budget',
+                    getattr(question, 'id_of_question', None),
+                )
+            return []
+        concurrency = int(os.getenv('BOT_QUESTION_CONCURRENCY', '2'))
+        if concurrency < 1:
+            raise ValueError('BOT_QUESTION_CONCURRENCY must be at least 1')
+        gate = asyncio.Semaphore(concurrency)
+        forecast_one = super().forecast_questions
+
+        async def run_one(question):
+            question_id = getattr(question, 'id_of_question', None)
+            async with gate:
+                if self._provider_halt:
+                    self._run_stats['not_started_stop'] += 1
+                    logger.error(
+                        'Not starting question %s after a provider credit or auth error',
+                        question_id,
+                    )
+                    return None
+                if self._past_run_budget():
+                    self._run_stats['not_started_budget'] += 1
+                    logger.error(
+                        'Not starting question %s after the run time budget',
+                        question_id,
+                    )
+                    return None
+                self._run_stats['attempted'] += 1
+                batch = await forecast_one([question], return_exceptions=True)
+                report = batch[0] if batch else RuntimeError('No report returned')
+                if isinstance(report, BaseException):
+                    if is_provider_account_error(report):
+                        self._provider_halt = True
+                        self._run_stats['failed'] += 1
+                        logger.error(
+                            'Provider credit or auth error on question %s; '
+                            'not recording a failure and not starting further questions. %s',
+                            question_id,
+                            self._sanitized_error(report),
+                        )
+                    else:
+                        self._record_failure(question_id)
+                        self._run_stats['failed'] += 1
+                else:
+                    self._run_stats['succeeded'] += 1
+                    if self._retry_requested(question_id):
+                        self._clear_failure(question_id)
+                return report
+
+        reports = [
+            report for report in await asyncio.gather(*(run_one(question) for question in runnable))
+            if report is not None
+        ]
         if not return_exceptions:
             for report in reports:
                 if isinstance(report, BaseException):
@@ -1074,6 +1230,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 from forecast_logic import validate_forecast
                 candidate = validate_forecast(raw, self._spec(question))
                 candidate['fallback_forecast'] = True
+                candidate['model'] = self._model_names[0]
                 result = type('Fallback', (), {
                     'candidates': [candidate],
                     'initial_candidates': [candidate],
@@ -1084,6 +1241,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                 await self._apply_structured_track(result, question, research)
             if UPGRADE.get('FF_MARKET_ANCHOR') and isinstance(question, BinaryQuestion):
                 await self._attach_market(question, result.candidates)
+            if getattr(result, 'review_triggered', False):
+                self._run_stats['review_triggers'] += 1
             structured = await self._shadow_structured(question, research)
             aggregate_raw, value, stages = self._aggregate(
                 result.candidates, question, initial=result.initial_candidates
@@ -1104,6 +1263,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     self._research_hashes.get(context['key'])
                     or store_research(research)
                 )
+                forecast_cost = sum(call.get('cost_usd', 0) or 0 for call in telemetry)
+                self._run_stats['forecast_cost_usd'] += forecast_cost
                 safe_append_event({
                     'event': 'forecast_reasoning_complete',
                     **{key: item for key, item in context.items() if key != 'key'},
@@ -1128,9 +1289,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     'market_anchor': (result.candidates[0].get('market_anchor') if result.candidates else None),
                     'prediction': to_jsonable(value),
                     'calls': telemetry,
-                    'tracked_call_cost_usd': sum(
-                        call.get('cost_usd', 0) or 0 for call in telemetry
-                    ),
+                    'tracked_call_cost_usd': forecast_cost,
                     'latency_s': time.monotonic() - started,
                 })
             return ReasonedPrediction(
@@ -1139,15 +1298,15 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         except BaseException as exc:
             if self._logging_enabled:
                 telemetry = list(self._call_telemetry.get(context['key'], []))
+                forecast_cost = sum(call.get('cost_usd', 0) or 0 for call in telemetry)
+                self._run_stats['forecast_cost_usd'] += forecast_cost
                 safe_append_event({
                     'event': 'forecast_reasoning_failed',
                     **{key: item for key, item in context.items() if key != 'key'},
                     'model_roster': self._model_names,
                     'research_hash': self._research_hashes.get(context['key']),
                     'calls': telemetry,
-                    'tracked_call_cost_usd': sum(
-                        call.get('cost_usd', 0) or 0 for call in telemetry
-                    ),
+                    'tracked_call_cost_usd': forecast_cost,
                     'latency_s': time.monotonic() - started,
                     'error_type': type(exc).__name__,
                     'error': str(exc)[:4000],

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-28
+
+Bot version `2026-09-28-v4-ensemble`.
+
+- Each configured model now forecasts twice. Samples stay grouped by model if one of them fails.
+- Review disagreement and the split-extreme check use the per-model mean, so the extra sample does not raise the trigger rate by itself.
+- Research keeps one search query per crux, at most five queries. The first query uses the web-search model; the rest use AskNews.
+- A coverage check lists open Fall questions that are still unforecast after two hours, and questions stuck after two failures. `BOT_RETRY_FAILED` can retry those ids on purpose.
+- The tournament workflow schedule is in the file. Enable the workflow on GitHub before it starts running.
+
 ## 2026-09-27
 
 Bot version `2026-09-27-v3-shadow`.

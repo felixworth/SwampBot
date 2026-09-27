@@ -154,6 +154,24 @@ def _review_view(candidates: list[dict]) -> list[dict]:
     return [{key: value for key, value in candidate.items() if key not in hidden} for candidate in candidates]
 
 
+def per_model_means(candidates: list[dict], extract) -> list[float]:
+    """Average each model's samples before measuring disagreement.
+
+    Candidates without a model label keep the old sample-by-sample comparison.
+    """
+    if not candidates or not all(candidate.get('model') for candidate in candidates):
+        return [extract(candidate) for candidate in candidates]
+    grouped: dict[str, list[float]] = {}
+    order: list[str] = []
+    for candidate in candidates:
+        model = str(candidate['model'])
+        if model not in grouped:
+            order.append(model)
+            grouped[model] = []
+        grouped[model].append(float(extract(candidate)))
+    return [sum(grouped[model]) / len(grouped[model]) for model in order]
+
+
 def review_reasons(candidates: list[dict], spec: dict, research: str, threshold: float) -> list[str]:
     reasons = []
     if any(c['needs_review'] for c in candidates):
@@ -161,7 +179,7 @@ def review_reasons(candidates: list[dict], spec: dict, research: str, threshold:
     if 'RESEARCH_FAILED' in research or not research.strip():
         reasons.append('A research lane failed or supplied no evidence')
     if spec['kind'] == 'binary':
-        values = [c['probability'] for c in candidates]
+        values = per_model_means(candidates, lambda candidate: candidate['probability'])
         if max(values) - min(values) >= threshold:
             reasons.append('Material disagreement between independent probabilities')
         from forecast_upgrades.timidity import extreme_trigger
@@ -170,7 +188,9 @@ def review_reasons(candidates: list[dict], spec: dict, research: str, threshold:
             reasons.append('Split extreme: ' + split)
     elif spec['kind'] == 'multiple_choice':
         for option in spec['options']:
-            values = [c['probabilities'][option] for c in candidates]
+            values = per_model_means(
+                candidates, lambda candidate, option=option: candidate['probabilities'][option]
+            )
             if max(values) - min(values) >= threshold:
                 reasons.append('Material disagreement on at least one option')
                 break
@@ -197,13 +217,14 @@ class EngineResult:
     initial_candidates: list[dict]
     notes: list[str]
     review: str = ''
+    review_triggered: bool = False
 
 
 class ForecastEngine:
     def __init__(self, invoke: Callable[[int, str], Awaitable[str]],
                  search: Callable[[str], Awaitable[str]], *, analyst_count: int = 2,
                  review_enabled: bool = True, disagreement: float = .20,
-                 call_timeout: float = 120):
+                 call_timeout: float = 120, labels: list[str] | None = None):
         if analyst_count not in range(1, 7):
             raise ValueError('Use one to six analysts')
         if not 0 < disagreement <= 1 or call_timeout <= 0:
@@ -211,6 +232,12 @@ class ForecastEngine:
         self.invoke, self.search = invoke, search
         self.analyst_count, self.review_enabled = analyst_count, review_enabled
         self.disagreement, self.call_timeout = disagreement, call_timeout
+        self.labels = labels
+
+    def _tag_model(self, index: int, candidate: dict) -> dict:
+        if self.labels and index < len(self.labels) and self.labels[index]:
+            candidate['model'] = self.labels[index]
+        return candidate
 
     async def _bounded(self, call, deadline):
         remaining = min(self.call_timeout, deadline - time.monotonic())
@@ -240,7 +267,7 @@ class ForecastEngine:
             for i, prompt in enumerate(prompts)
         ], return_exceptions=True)
         indices = [i for i, result in enumerate(results) if not isinstance(result, BaseException)]
-        candidates = [results[i] for i in indices]
+        candidates = [self._tag_model(i, results[i]) for i in indices]
         notes = [f'Analyst {i + 1} failed: {type(r).__name__}'
                  for i, r in enumerate(results) if isinstance(r, BaseException)]
         if not candidates:
@@ -290,8 +317,8 @@ Triggers: {json.dumps(reasons)}
                 if isinstance(result, BaseException):
                     notes.append(f'Analyst {indices[j] + 1} revision failed; original retained')
                 else:
-                    candidates[j] = result
-            return EngineResult(candidates, initial, notes, review)
+                    candidates[j] = self._tag_model(indices[j], result)
+            return EngineResult(candidates, initial, notes, review, review_triggered=True)
         except Exception as exc:
             notes.append(f'Review failed: {type(exc).__name__}; original forecasts retained')
-            return EngineResult(candidates, initial, notes)
+            return EngineResult(candidates, initial, notes, review_triggered=True)
