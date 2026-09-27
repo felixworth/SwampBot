@@ -527,7 +527,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
         spec_input = self._spec(question)
         spec = research_v2.validate_resolution_spec(
             await self._invoke_cheap('resolution_spec', research_v2.spec_prompt(spec_input)),
-            close_time=getattr(question, 'close_time', None),
+            scheduled_resolution_time=getattr(question, 'scheduled_resolution_time', None),
+            forecasts_close=getattr(question, 'close_time', None),
         )
         facts = await asyncio.gather(*[
             asyncio.to_thread(research_v2.fetch_resolution_fact, url)

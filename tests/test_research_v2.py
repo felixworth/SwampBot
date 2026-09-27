@@ -23,20 +23,25 @@ def test_time_remaining_is_computed_in_code():
     assert time_remaining_days(close, now) == pytest.approx(6.0)
 
 
-def test_validate_resolution_spec_adds_horizon():
+def test_validate_resolution_spec_uses_event_deadline_not_close():
     raw = json.dumps({
         "question_type": "binary",
         "archetype": "deadline_event",
         "target": "Event X happens",
+        "deadline_utc": "2026-12-01T00:00:00+00:00",
         "resolution_sources": [{"name": "Gov", "url": "https://example.org", "kind": "webpage"}],
         "ambiguities": [],
     })
+    now = datetime(2026, 9, 24, tzinfo=timezone.utc)
     spec = validate_resolution_spec(
         raw,
-        close_time=datetime(2026, 10, 1, tzinfo=timezone.utc),
-        now=datetime(2026, 9, 24, tzinfo=timezone.utc),
+        scheduled_resolution_time=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        forecasts_close=datetime(2026, 9, 30, tzinfo=timezone.utc),
+        now=now,
     )
-    assert spec["time_remaining_days"] == pytest.approx(7.0)
+    assert spec["time_remaining_days"] == pytest.approx(68.0)
+    assert spec["event_deadline"].startswith("2026-12-01")
+    assert spec["forecasts_close"].startswith("2026-09-30")
     assert spec["target"] == "Event X happens"
 
 
@@ -98,6 +103,8 @@ def test_brief_has_fixed_section_order():
         ["Need turnout data"],
     )
     order = [brief.index(header) for header in (
+        "## Forecasts close",
+        "## Event deadline",
         "## Resolution spec",
         "## Resolution facts",
         "## Outside view",

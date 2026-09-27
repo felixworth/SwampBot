@@ -31,20 +31,43 @@ CLAIMS_INSTRUCTION = (
 )
 
 
-def time_remaining_days(close_time, now=None) -> float | None:
-    if close_time is None:
+def time_remaining_days(deadline, now=None) -> float | None:
+    if deadline is None or deadline == "":
         return None
     current = now or datetime.now(timezone.utc)
-    if isinstance(close_time, str):
-        close_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-    if close_time.tzinfo is None:
-        close_time = close_time.replace(tzinfo=timezone.utc)
+    if isinstance(deadline, str):
+        deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    return (close_time - current).total_seconds() / 86400
+    return (deadline - current).total_seconds() / 86400
 
 
-def validate_resolution_spec(raw: str, close_time=None, now=None) -> dict[str, Any]:
+def _as_iso(value) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
+def event_deadline(spec: dict[str, Any], scheduled_resolution_time=None):
+    """Event horizon: spec deadline_utc, else scheduled resolution. Never close time."""
+    deadline = spec.get("deadline_utc")
+    if isinstance(deadline, str) and not deadline.strip():
+        deadline = None
+    if deadline is None:
+        deadline = scheduled_resolution_time
+    return deadline
+
+
+def validate_resolution_spec(
+    raw: str,
+    scheduled_resolution_time=None,
+    forecasts_close=None,
+    now=None,
+) -> dict[str, Any]:
     data = parse_json(raw)
     required = ("question_type", "archetype", "target", "resolution_sources")
     missing = [key for key in required if key not in data]
@@ -52,7 +75,10 @@ def validate_resolution_spec(raw: str, close_time=None, now=None) -> dict[str, A
         raise ValueError("Resolution spec missing: " + ", ".join(missing))
     if not isinstance(data.get("resolution_sources"), list):
         raise ValueError("resolution_sources must be a list")
-    data["time_remaining_days"] = time_remaining_days(close_time, now)
+    horizon = event_deadline(data, scheduled_resolution_time)
+    data["event_deadline"] = _as_iso(horizon)
+    data["forecasts_close"] = _as_iso(forecasts_close)
+    data["time_remaining_days"] = time_remaining_days(horizon, now)
     data.setdefault("ambiguities", [])
     data.setdefault("remaining_conditions", [])
     return data
@@ -242,6 +268,8 @@ def format_research_brief(
     uncertainties: list[str],
 ) -> str:
     sections = [
+        "## Forecasts close\n" + str(spec.get("forecasts_close") or "unknown"),
+        "## Event deadline\n" + str(spec.get("event_deadline") or "unknown"),
         "## Resolution spec\n" + json.dumps(spec, default=str, separators=(',', ':')),
         "## Resolution facts\n" + json.dumps(facts, default=str, separators=(',', ':')),
         "## Outside view\n" + (
