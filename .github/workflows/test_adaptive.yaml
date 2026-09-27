@@ -26,7 +26,7 @@ jobs:
       - name: Offline tests
         run: poetry run python -m unittest discover -s tests -v
       - name: Testing-area dry run (uses model credits, no submission)
-        run: poetry run python run_adaptive.py --mode test_questions
+        run: poetry run python run_adaptive.py --mode test_questions --limit 1
         env:
           METACULUS_TOKEN: ${{ secrets.METAC_API }}
           OPENROUTER_API_KEY: ${{ secrets.METAC_OPENR_API }}
