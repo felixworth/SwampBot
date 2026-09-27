@@ -126,6 +126,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             raise ValueError('Invalid research reliability settings')
         self._research_consecutive_failures = 0
         self._research_breaker_open_until = 0.0
+        self._resolution_specs = {}
+        self._failure_path = Path(os.getenv('BOT_FAILURE_PATH', 'data/failures.json'))
         self._fallback_researcher = (
             GeneralLlm(
                 model=self._research_fallback,
@@ -226,7 +228,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             timeout=self.call_timeout,
             allowed_tries=1,
             max_tokens=self.max_output_tokens * 2,
-            reasoning_effort=UPGRADE.get('reasoning_effort', 'high'),
+            reasoning_effort='low',
         )
         return await self._tracked_call(
             kind=kind,
@@ -525,10 +527,11 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             await self._invoke_cheap('resolution_spec', research_v2.spec_prompt(spec_input)),
             close_time=getattr(question, 'close_time', None),
         )
-        facts = [
-            research_v2.fetch_resolution_fact(url)
+        facts = await asyncio.gather(*[
+            asyncio.to_thread(research_v2.fetch_resolution_fact, url)
             for url in research_v2.extract_source_urls(spec)
-        ]
+        ])
+        self._resolution_specs[id(question)] = spec
         cruxes = research_v2.validate_cruxes(
             await self._invoke_cheap(
                 'cruxes', research_v2.crux_prompt(spec_input, spec, facts)
@@ -550,7 +553,8 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     'Investigate this factual gap. Give dated sources, distinguish '
                     'confirmed facts from inference, deduplicate syndicated reports. '
                     'Do not forecast.\nQUERY: ' + query
-                    + '\nQUESTION DATA:\n' + json.dumps(spec_input, default=str)
+                    + '\nQUESTION:\n' + str(spec_input.get('question_text') or '')
+                    + '\nRESOLUTION CRITERIA:\n' + str(spec_input.get('resolution_criteria') or '')
                 )
                 try:
                     text = await self._search_named_route(route, prompt)
@@ -842,11 +846,12 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             logger.exception('Numeric v2 failed; using the SDK mixture')
             return None
 
-    def _attach_market(self, question, candidates):
+    async def _attach_market(self, question, candidates):
         if not candidates:
             return
         try:
-            match = market_anchor.match_manifold(
+            match = await asyncio.to_thread(
+                market_anchor.match_manifold,
                 getattr(question, 'question_text', '') or '',
                 getattr(question, 'close_time', None),
             )
@@ -857,12 +862,13 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             candidates[0]['market_price'] = match['price']
             candidates[0]['market_anchor'] = match
 
-    async def _apply_structured_track(self, result, research):
+    async def _apply_structured_track(self, result, question, research):
         direct = result.candidates[0].get('probability') if result.candidates else None
         if not isinstance(direct, (int, float)):
             return
-        base, description = structured_track.baseline_probability(None, float(direct))
-        if base is None:
+        spec = self._resolution_specs.get(id(question))
+        base, description = structured_track.baseline_probability(spec, float(direct))
+        if description not in ('deadline hazard', 'scenario tree'):
             return
         try:
             raw = await self._invoke_cheap(
@@ -873,17 +879,73 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             logger.exception('Structured factor update skipped; ensemble forecast kept')
 
     def _blend_structured(self, direct, candidates):
+        updated = direct
         items = []
         for candidate in candidates:
             for factor in candidate.get('factors') or []:
                 if isinstance(factor, dict) and factor.get('odds_multiplier'):
                     items.append(factor)
-        if not items:
-            return direct
-        updated, _trace = evidence_update(direct, items)
+        if items:
+            structured, _trace = evidence_update(direct, items)
+            updated = blend_logodds(direct, structured, UPGRADE.get('structured_weight', 0.5))
         if UPGRADE.get('FF_MARKET_ANCHOR') and candidates and candidates[0].get('market_price'):
-            updated = blend_logodds(updated, float(candidates[0]['market_price']), UPGRADE['market_blend_weight'])
-        return blend_logodds(direct, updated, UPGRADE.get('structured_weight', 0.5))
+            updated = blend_logodds(
+                updated, float(candidates[0]['market_price']), UPGRADE['market_blend_weight']
+            )
+        return updated
+
+    def _failure_counts(self):
+        try:
+            if self._failure_path.exists():
+                data = json.loads(self._failure_path.read_text(encoding='utf-8'))
+                if isinstance(data, dict):
+                    return {str(key): int(value) for key, value in data.items()}
+        except Exception:
+            logger.exception('Could not read failure counts')
+        return {}
+
+    def _failure_count(self, question_id):
+        if question_id is None:
+            return 0
+        return self._failure_counts().get(str(question_id), 0)
+
+    def _record_failure(self, question_id):
+        if question_id is None:
+            return
+        counts = self._failure_counts()
+        counts[str(question_id)] = counts.get(str(question_id), 0) + 1
+        try:
+            self._failure_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self._failure_path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(counts), encoding='utf-8')
+            os.replace(temporary, self._failure_path)
+        except Exception:
+            logger.exception('Could not record question failure')
+
+    async def forecast_questions(self, questions, return_exceptions=False):
+        if self.skip_previously_forecasted_questions:
+            questions = [
+                question for question in questions
+                if not getattr(question, 'already_forecasted', False)
+            ]
+        runnable = []
+        for question in questions:
+            question_id = getattr(question, 'id_of_question', None)
+            if self._failure_count(question_id) >= 2:
+                logger.warning(
+                    'Skipping question %s after repeated failures', question_id
+                )
+                continue
+            runnable.append(question)
+        reports = await super().forecast_questions(runnable, return_exceptions=True)
+        for question, report in zip(runnable, reports):
+            if isinstance(report, BaseException):
+                self._record_failure(getattr(question, 'id_of_question', None))
+        if not return_exceptions:
+            for report in reports:
+                if isinstance(report, BaseException):
+                    raise report
+        return reports
 
     def _combine(self, candidates, question):
         return self._aggregate(candidates, question)[1]
@@ -915,9 +977,9 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
                     'review': '',
                 })()
             if UPGRADE.get('FF_STRUCTURED_MODELS') and isinstance(question, BinaryQuestion):
-                await self._apply_structured_track(result, research)
+                await self._apply_structured_track(result, question, research)
             if UPGRADE.get('FF_MARKET_ANCHOR') and isinstance(question, BinaryQuestion):
-                self._attach_market(question, result.candidates)
+                await self._attach_market(question, result.candidates)
             aggregate_raw, value = self._aggregate(result.candidates, question)
             explanation = ('## Adaptive forecast\n'
                            'Median binary aggregation with last-step caps; multiple-choice mean with a floor. '
