@@ -187,6 +187,43 @@ def similar_questions(title: str, records: list[dict[str, Any]], limit: int = 3)
     return [item[1] for item in scored[:limit]]
 
 
+def join_outcomes(
+    records: list[dict[str, Any]],
+    path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Attach resolved outcomes from data/outcomes.jsonl by question id."""
+    destination = Path(path or UPGRADE["outcomes_path"])
+    outcomes: dict[Any, Any] = {}
+    if destination.exists():
+        for line in destination.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            question_id = row.get("question_id")
+            if question_id is None:
+                continue
+            outcomes[question_id] = row.get("outcome")
+            try:
+                outcomes[int(question_id)] = row.get("outcome")
+            except (TypeError, ValueError):
+                pass
+    joined = []
+    for record in records:
+        item = dict(record)
+        if item.get("outcome") is None:
+            question_id = item.get("question_id")
+            if question_id in outcomes:
+                item["outcome"] = outcomes[question_id]
+            else:
+                try:
+                    if int(question_id) in outcomes:
+                        item["outcome"] = outcomes[int(question_id)]
+                except (TypeError, ValueError):
+                    pass
+        joined.append(item)
+    return joined
+
+
 def load_log_records(path: str | Path | None = None) -> list[dict[str, Any]]:
     paths = []
     if path:

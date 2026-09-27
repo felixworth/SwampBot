@@ -597,7 +597,7 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             claims = []
         outside = research_v2.similar_questions(
             getattr(question, 'question_text', '') or '',
-            research_v2.load_log_records(),
+            research_v2.join_outcomes(research_v2.load_log_records()),
         )
         unanswered = [
             crux['question']

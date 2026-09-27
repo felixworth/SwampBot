@@ -10,6 +10,7 @@ from research_v2 import (
     fetch_resolution_fact,
     format_research_brief,
     merge_claims,
+    join_outcomes,
     similar_questions,
     time_remaining_days,
     validate_cruxes,
@@ -81,6 +82,22 @@ def test_similar_questions_uses_title_overlap():
     ]
     matches = similar_questions("Will Italy leave the EU before 2028?", records)
     assert matches and matches[0]["question_id"] == 1
+
+
+def test_join_outcomes_before_similar_questions(tmp_path):
+    path = tmp_path / "outcomes.jsonl"
+    path.write_text(json.dumps({"question_id": 7, "outcome": 1}) + "\n", encoding="utf-8")
+    records = [{
+        "question_id": "7",
+        "title": "Will Italy leave the EU before 2028?",
+        "final_submitted": 0.2,
+    }]
+    matches = similar_questions(
+        "Will France leave the EU before 2027?",
+        join_outcomes(records, path),
+    )
+    assert matches and matches[0]["outcome"] == 1
+    assert matches[0]["question_id"] == "7"
 
 
 def test_fetch_resolution_fact_records_failures(monkeypatch):
