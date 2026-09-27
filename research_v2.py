@@ -82,7 +82,7 @@ def parse_deadline(value: Any) -> datetime | None:
                 except ValueError:
                     continue
             if parsed is None:
-                raise ValueError(f"deadline_utc is not a date: {text}")
+                return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
@@ -131,13 +131,19 @@ def validate_resolution_spec(
         raise ValueError("resolution_sources must be a list")
     archetype = canonical_archetype(data.get("archetype"))
     if archetype is None:
-        raise ValueError(
-            "archetype must be one of " + ", ".join(ARCHETYPE_DEFINITIONS)
-        )
-    data["archetype"] = archetype
-    if data.get("deadline_utc"):
-        parsed_deadline = parse_deadline(data.get("deadline_utc"))
-        if parsed_deadline is not None:
+        data["archetype"] = "other"
+        data["archetype_unrecognised"] = True
+    else:
+        data["archetype"] = archetype
+    raw_deadline = data.get("deadline_utc")
+    if isinstance(raw_deadline, str) and not raw_deadline.strip():
+        raw_deadline = None
+    if raw_deadline not in (None, ""):
+        parsed_deadline = parse_deadline(raw_deadline)
+        if parsed_deadline is None:
+            data["deadline_utc"] = None
+            data["deadline_unparsed"] = True
+        else:
             data["deadline_utc"] = parsed_deadline.isoformat()
     horizon = event_deadline(data, scheduled_resolution_time)
     data["event_deadline"] = _as_iso(horizon)
