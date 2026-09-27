@@ -22,6 +22,10 @@ FIELD_MAP = {
     "submitted": "submitted_value",
     "tournament": "tournament",
     "archetype": "archetype",
+    "stages": "stages",
+    "structured": "structured",
+    "market_anchor": "market_anchor",
+    "bot_version": "bot_version",
 }
 
 _BINARY_KEYS = ("probability", "prediction", "forecast", "p", "value")
@@ -86,6 +90,10 @@ def events_to_records(events: Iterable[Mapping], outcomes: Mapping[Any, Any], fm
             "segment": ev.get(fmap["archetype"]),
             "source": ev.get(fmap["tournament"]),
             "final_submitted": ev.get(fmap["submitted"]),
+            "stages": ev.get(fmap.get("stages", "stages")) or {},
+            "structured": ev.get(fmap.get("structured", "structured")),
+            "market_anchor": ev.get(fmap.get("market_anchor", "market_anchor")),
+            "bot_version": ev.get(fmap.get("bot_version", "bot_version")),
             "members": members,
             "outcome": outcomes.get(qid),
         })

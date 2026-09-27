@@ -164,8 +164,10 @@ def review_reasons(candidates: list[dict], spec: dict, research: str, threshold:
         values = [c['probability'] for c in candidates]
         if max(values) - min(values) >= threshold:
             reasons.append('Material disagreement between independent probabilities')
-        if any(p <= .05 or p >= .95 for p in values):
-            reasons.append('Extreme probability requires an evidence and resolution audit')
+        from forecast_upgrades.timidity import extreme_trigger
+        split = extreme_trigger(values)
+        if split:
+            reasons.append('Split extreme: ' + split)
     elif spec['kind'] == 'multiple_choice':
         for option in spec['options']:
             values = [c['probabilities'][option] for c in candidates]

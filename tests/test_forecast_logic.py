@@ -54,7 +54,8 @@ class ValidationTests(unittest.TestCase):
         validate_forecast(json.dumps(value), spec)
 
     def test_agreement_is_not_sufficient_to_skip_review(self):
-        self.assertTrue(review_reasons([candidate(.97), candidate(.97)], SPEC, 'sources', .2))
+        self.assertFalse(review_reasons([candidate(.97), candidate(.97)], SPEC, 'sources', .2))
+        self.assertTrue(review_reasons([candidate(.97), candidate(.40)], SPEC, 'sources', .2))
         self.assertTrue(review_reasons([candidate(.6), candidate(.6)], SPEC, 'RESEARCH_FAILED', .2))
         self.assertFalse(review_reasons([candidate(.6), candidate(.65)], SPEC, 'sources', .2))
 
