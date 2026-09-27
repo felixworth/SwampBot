@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from adaptive_bot import AdaptiveForecastBot, assign_research_route
+from adaptive_bot import AdaptiveForecastBot, assign_research_route, web_queries_for_archetype
 from forecast_logic import ForecastEngine, review_reasons
 from forecast_upgrades.advanced import hierarchical_logit_aggregate
 from forecasting_tools import BinaryQuestion
@@ -75,6 +75,27 @@ def test_first_crux_uses_the_web_model():
     route, used = assign_research_route(used, primary, fallback)
     assert route == primary and used == 1
     assert int(UPGRADE["research_web_queries"]) == 1
+    assert int(UPGRADE["research_max_queries"]) == 5
+
+
+def test_web_query_count_follows_archetype():
+    primary = "asknews/news-summaries"
+    fallback = "openrouter/openai/gpt-6-sol:online"
+    assert web_queries_for_archetype("deadline_event") == 1
+    assert web_queries_for_archetype("scheduled_decision") == 1
+    assert web_queries_for_archetype("multiple_choice") == 1
+    assert web_queries_for_archetype("threshold_quantity") == 2
+    assert web_queries_for_archetype("other") == 2
+    assert web_queries_for_archetype("numeric_quantity") == 3
+    assert web_queries_for_archetype("not_a_known_archetype") == 1
+    used = 0
+    routes = []
+    for _ in range(5):
+        route, used = assign_research_route(
+            used, primary, fallback, web_queries_for_archetype("numeric_quantity")
+        )
+        routes.append(route)
+    assert routes == [fallback, fallback, fallback, primary, primary]
 
 
 def test_research_v2_routes_only_the_first_crux_to_the_web_model(tmp_path, monkeypatch):
