@@ -220,11 +220,16 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
             kind = 'initial_forecast'
         if kind == 'review' and UPGRADE.get('FF_SEPARATE_REVIEWER'):
             index = 0
-        response = await self._tracked_call(
-            kind=kind,
-            model=self._model_names[index],
-            call=lambda: self._analysts[index].invoke(prompt),
-        )
+        try:
+            response = await self._tracked_call(
+                kind=kind,
+                model=self._model_names[index],
+                call=lambda: self._analysts[index].invoke(prompt),
+            )
+        except RuntimeError as exc:
+            if "empty string" not in str(exc).lower():
+                raise
+            response = None
         if response and str(response).strip():
             return response
         doubled = GeneralLlm(
