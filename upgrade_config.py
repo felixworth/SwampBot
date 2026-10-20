@@ -9,7 +9,7 @@ UPGRADE = {
     # Feature flags. Calibration is identity-only while calibration.json is absent.
     "FF_RESOLUTION_SPEC": True,
     "FF_RESEARCH_V2": True,
-    "FF_ENSEMBLE_V2": False,
+    "FF_ENSEMBLE_V2": True,
     "FF_STRUCTURED_MODELS": True,
     "FF_TRIGGERS_V2": False,
     "FF_RESOLUTION_ROUND": False,

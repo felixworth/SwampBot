@@ -47,7 +47,7 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(report.prediction, .6, delta=0.02)
         self.assertIn('Initial forecasts', report.explanation)
         submit.assert_not_called()
-        self.assertEqual(bot._engine.invoke.await_count, 2)
+        self.assertEqual(bot._engine.invoke.await_count, 4)
         self.assertEqual(bot.predictions_per_research_report, 1)
         self.assertEqual(bot._search.await_count, 2)
 
