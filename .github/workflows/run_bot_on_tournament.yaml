@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 
 
-# Run the adaptive bot on the configured seasonal tournament only.
+# Run the adaptive bot on the configured seasonal tournament and MiniBench.
 jobs:
   forecast_job:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
@@ -50,7 +50,7 @@ jobs:
           python -c "import os,sys; m=os.environ.get('BOT_MODELS','').strip(); sys.exit('BOT_MODELS is missing or still uses gpt-4o') if (not m or 'gpt-4o' in m) else None"
       - name: Run bot
         run: |
-          poetry run python run_adaptive.py --mode tournament --publish
+          poetry run python run_adaptive.py --mode tournament --include-minibench --publish
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -67,6 +67,7 @@ jobs:
           BOT_RESEARCHER: ${{ vars.BOT_RESEARCHER }}
           BOT_RESEARCH_FALLBACK: ${{ vars.BOT_RESEARCH_FALLBACK }}
           BOT_TOURNAMENT_ID: ${{ vars.BOT_TOURNAMENT_ID }}
+          BOT_MINIBENCH_ID: ${{ vars.BOT_MINIBENCH_ID }}
           BOT_ENABLE_REVIEW: ${{ vars.BOT_ENABLE_REVIEW }}
           BOT_ENABLE_DURABLE_LOGGING: "true"
           BOT_RETRY_FAILED: ${{ vars.BOT_RETRY_FAILED }}
@@ -90,11 +91,3 @@ jobs:
           git commit -qm "run ${GITHUB_RUN_ID}" || exit 0
           for i in 1 2 3 4 5; do git pull --rebase -q && git push -q && exit 0; sleep $((i*7)); done
           echo "::warning::log push failed after 5 attempts"; exit 1
-      - name: Preserve private forecast logs
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: adaptive-forecast-logs-${{ github.run_id }}
-          path: logs/
-          if-no-files-found: ignore
-          retention-days: 90

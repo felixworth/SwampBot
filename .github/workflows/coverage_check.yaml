@@ -36,4 +36,6 @@ jobs:
         env:
           METACULUS_TOKEN: ${{ secrets.METAC_API }}
           BOT_TOURNAMENT_ID: ${{ vars.BOT_TOURNAMENT_ID }}
+          BOT_INCLUDE_MINIBENCH: "true"
+          BOT_MINIBENCH_ID: ${{ vars.BOT_MINIBENCH_ID }}
         run: poetry run python scripts/coverage_check.py

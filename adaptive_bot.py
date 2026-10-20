@@ -818,7 +818,12 @@ class AdaptiveForecastBot(SummerTemplateBot2026):
     @staticmethod
     def _is_minibench(question):
         slugs = getattr(question, 'tournament_slugs', None) or []
-        return any('minibench' in str(slug).lower() for slug in slugs)
+        configured = os.getenv('BOT_MINIBENCH_ID', '').strip().lower()
+        for slug in slugs:
+            text = str(slug).lower()
+            if 'minibench' in text or (configured and text == configured):
+                return True
+        return False
 
     def _calibration_payload(self):
         path = Path(UPGRADE['calibration_path'])

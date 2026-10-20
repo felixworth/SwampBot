@@ -9,7 +9,7 @@ UPGRADE = {
     # Feature flags. Calibration is identity-only while calibration.json is absent.
     "FF_RESOLUTION_SPEC": True,
     "FF_RESEARCH_V2": True,
-    "FF_ENSEMBLE_V2": True,
+    "FF_ENSEMBLE_V2": False,
     "FF_STRUCTURED_MODELS": True,
     "FF_TRIGGERS_V2": False,
     "FF_RESOLUTION_ROUND": False,
@@ -82,7 +82,7 @@ UPGRADE = {
     "market_blend_weight": 0.15,
     "STRUCTURED_MODE": "shadow",
     "STRUCTURED_BLEND_WEIGHT": 0.5,
-    "bot_version": "2026-09-28-v5-routing",
+    "bot_version": "2026-10-20-v6-minibench-oss",
     "market_max_deadline_gap_days": 7,
 
     # Calibration and caps.
