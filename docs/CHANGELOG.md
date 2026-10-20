@@ -5,7 +5,7 @@
 Bot version `2026-10-20-v6-minibench-oss`.
 
 - Forecast logs are no longer uploaded as public Actions artifacts, and per-forecast reasoning is no longer printed in the job log.
-- The tournament job also forecasts MiniBench. The slug can be set with `BOT_MINIBENCH_ID`.
+- MiniBench has its own workflow. The Fall job forecasts only the seasonal tournament. The MiniBench slug can be set with `BOT_MINIBENCH_ID`.
 - The ensemble is unchanged: two forecasts per model.
 - The repository includes an MIT licence.
 
