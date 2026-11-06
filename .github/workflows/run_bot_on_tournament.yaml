@@ -90,11 +90,3 @@ jobs:
           git commit -qm "run ${GITHUB_RUN_ID}" || exit 0
           for i in 1 2 3 4 5; do git pull --rebase -q && git push -q && exit 0; sleep $((i*7)); done
           echo "::warning::log push failed after 5 attempts"; exit 1
-      - name: Preserve private forecast logs
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: adaptive-forecast-logs-${{ github.run_id }}
-          path: logs/
-          if-no-files-found: ignore
-          retention-days: 90

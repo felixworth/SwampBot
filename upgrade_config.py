@@ -82,7 +82,7 @@ UPGRADE = {
     "market_blend_weight": 0.15,
     "STRUCTURED_MODE": "shadow",
     "STRUCTURED_BLEND_WEIGHT": 0.5,
-    "bot_version": "2026-09-28-v5-routing",
+    "bot_version": "2026-10-20-v6-minibench-oss",
     "market_max_deadline_gap_days": 7,
 
     # Calibration and caps.

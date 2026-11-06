@@ -39,6 +39,11 @@ def log_dry_run_payloads(reports):
         logger.exception("Could not render dry-run payloads")
 
 
+def minibench_id(client) -> str:
+    """MiniBench slug from the GitHub variable, otherwise the SDK default."""
+    return os.getenv("BOT_MINIBENCH_ID", "").strip() or str(client.CURRENT_MINIBENCH_ID)
+
+
 def _analyst_count() -> int:
     names = [part.strip() for part in os.getenv("BOT_MODELS", "").split(",") if part.strip()]
     if UPGRADE.get("FF_ENSEMBLE_V2"):
@@ -223,8 +228,8 @@ async def run(args):
         bot.skip_previously_forecasted_questions = False
     else:
         targets = [args.tournament_id]
-        if args.include_minibench and args.tournament_id != str(client.CURRENT_MINIBENCH_ID):
-            targets.append(client.CURRENT_MINIBENCH_ID)
+        if args.include_minibench and args.tournament_id != str(minibench_id(client)):
+            targets.append(minibench_id(client))
     reports = []
     # Use one event loop: the SDK and model concurrency locks are reused safely.
     for target in targets:
@@ -250,7 +255,6 @@ async def run(args):
             review_triggers=bot._run_stats.get('review_triggers', 0),
             run_stats=dict(bot._run_stats),
         )
-    bot.log_report_summary(reports, raise_errors=False)
     print_run_summary_banner(reports, will_publish=args.publish)
     _write_step_summary(bot._run_stats)
     return 1 if any(isinstance(r, BaseException) for r in reports) else 0

@@ -42,10 +42,3 @@ jobs:
           BOT_RESEARCH_FALLBACK: ${{ vars.BOT_RESEARCH_FALLBACK }}
           BOT_ENABLE_REVIEW: ${{ vars.BOT_ENABLE_REVIEW }}
           BOT_ENABLE_DURABLE_LOGGING: "true"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: adaptive-dry-run-reports
-          path: logs/
-          if-no-files-found: ignore
-          retention-days: 90

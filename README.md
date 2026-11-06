@@ -1,3 +1,13 @@
+# About this bot
+
+This bot forecasts Metaculus questions. It starts from the resolution criteria, searches the cruxes that would move the forecast, and keeps a claims ledger that counts related reports as one piece of evidence. Several models then forecast independently. A reviewer sees the forecasts without their numbers, and the binary result is a log-odds shrinkage of those forecasts. Numeric and date questions are mixed as cumulative distributions.
+
+It runs on GitHub Actions on a schedule. Forecast logs and research notes are written to a separate private data repository, not published with this code.
+
+The forecasting strategy is in `adaptive_bot.py`. The forecast and review prompts are in `forecast_logic.py`. Resolution-first research is in `research_v2.py`. Aggregation, calibration, and the shadow structured track are in `forecast_upgrades/`. The pre-registered study of that track is `docs/prereg_structured_track.md`.
+
+The rest of this README is the original Metaculus template guide.
+
 # Simple Metaculus forecasting bot
 This repository contains a simple bot meant to get you started with creating your own bot for the AI Forecasting Tournament. Go to https://www.metaculus.com/futureeval/participate/ for more info and tournament rules (and then go to the  "Getting Started" section of our [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#want-to-join-the-ai-forecasting-benchmark) page).
 
